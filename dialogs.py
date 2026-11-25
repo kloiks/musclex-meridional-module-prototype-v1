@@ -56,6 +56,7 @@ PARAM_GROUPS = [
     ("Labelling", [("tol_pct", "Default tolerance (% of d)", None),
                    ("min_frames", "Min frames of a labelled track", None)]),
 ]
+MINIMUMS = {"base": 2}  # the other numbers start at 0
 
 
 def save_params(values):
@@ -188,6 +189,8 @@ class ParametersDialog(QDialog):
             form = QFormLayout(box)
             for key, label, choices in items:
                 w = self.widget(DEFAULTS[key], choices)
+                if key in MINIMUMS:
+                    w.setMinimum(MINIMUMS[key])
                 self.widgets[key] = w
                 form.addRow(label, w)
             sides[title.startswith(("Multiscale", "Labelling"))].addWidget(box)

@@ -95,6 +95,8 @@ def detect_level(ks, pos, p, background=None):
 
 def scale_ladder(n, base=2):
     """Coarse to fine: n, ..., base^2, base, 1."""
+    if base < 2:  # the scales would never reach n
+        raise ValueError(f"the scale ratio (base) is {base}; it must be at least 2. Change it in Parameters")
     s, out = 1, []
     while s < n:
         out.append(s)

@@ -306,6 +306,24 @@ class TestStripAndBlankFrames(unittest.TestCase):
             self.assertEqual(np.flatnonzero(blank).tolist(), list(range(dark.start, dark.stop)))
 
 
+class TestScaleRatio(unittest.TestCase):
+    def test_ladder(self):
+        self.assertEqual(multiscale.scale_ladder(59, 2), [59, 32, 16, 8, 4, 2, 1])
+        self.assertEqual(multiscale.scale_ladder(59, 3), [59, 27, 9, 3, 1])
+        for base in (1, 0, -1):
+            with self.assertRaisesRegex(ValueError, "at least 2"):
+                multiscale.scale_ladder(59, base)
+
+    def test_dialog_minimum(self):
+        from dialogs import ParametersDialog
+        qt_app()
+        d = ParametersDialog(None)
+        self.addCleanup(delete_widget, d)
+        d.widgets["base"].setValue(1)
+        self.assertEqual(d.widgets["base"].value(), 2)
+        self.assertEqual(d.widgets["drop_pad"].minimum(), 0)
+
+
 class TestCalibrationDialog(unittest.TestCase):
     """What Save writes after each way of setting M3 (auto M3: 60 px in frame 1, 70 px in frame 2)."""
 
