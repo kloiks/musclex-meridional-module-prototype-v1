@@ -29,14 +29,14 @@ def broken(frames, x, y):
 
 
 def smooth_series(h, frames, window):
-    """Centred moving mean of one value per kept frame over ``window`` frames, NaNs (not detected)
-    skipped and kept; never averaged across excluded frames."""
+    """Moving mean of one value per kept frame over ``window`` frames, centred (an even window reaches
+    one frame further back), NaNs (not detected) skipped and kept; never averaged across excluded frames."""
     out = h.copy()
-    half = window // 2
+    before = window // 2
     for seg in np.split(np.arange(len(h)), np.flatnonzero(np.diff(frames) > 1) + 1):
         y = h[seg]
-        for i in np.flatnonzero(np.isfinite(y)) if half else ():
-            out[seg[i]] = np.nanmean(y[max(i - half, 0):i + half + 1])
+        for i in np.flatnonzero(np.isfinite(y)) if window > 1 else ():
+            out[seg[i]] = np.nanmean(y[max(i - before, 0):i - before + window])
     return out
 
 
@@ -45,10 +45,11 @@ def time_line(ax):
     return ax.axvline(0.0, color=TIME_COLOR, lw=1)
 
 
-def style_time_axis(ax, t_max):
+def style_time_axis(ax, t_max, left_labels=False):
+    room = 0.12 * t_max  # for labels
     ax.set_xlabel("time (s)", fontsize=9)
     ax.tick_params(labelsize=8)
-    ax.set_xlim(0.0, t_max + 0.12 * t_max)  # room for labels
+    ax.set_xlim(-room if left_labels else 0.0, t_max + room)
     ax.grid(axis="y", lw=0.6, color="#e9e9e9")
 
 

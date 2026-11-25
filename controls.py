@@ -245,21 +245,15 @@ class SmoothingRow(QObject):
     """A window (frames) that smooths one panel's lines over time; 1 = off."""
     changed = Signal()
 
-    def __init__(self, label, note):
+    def __init__(self, label, note, value):
         super().__init__()
-        self.box = QSpinBox(minimum=1, maximum=101, singleStep=2, value=1, suffix=" frames")
+        self.box = QSpinBox(minimum=1, maximum=101, value=value, suffix=" frames")
         self.box.setSpecialValueText("off")
         self.box.setKeyboardTracking(False)
-        self.box.setToolTip("Moving mean over this many frames (odd), separately on each side of "
+        self.box.setToolTip("Moving mean over this many frames, separately on each side of "
                             f"excluded frames.\nOnly the plotted lines change; {note}.")
-        self.box.valueChanged.connect(self.set_value)
+        self.box.valueChanged.connect(lambda _: self.changed.emit())
         self.row = make_row(label, self.box, None)
-
-    def set_value(self, v):
-        if v % 2:
-            self.changed.emit()
-        else:  # a centred window is odd: an even value moves up one, which signals again
-            self.box.setValue(v + 1)
 
     @property
     def window(self):

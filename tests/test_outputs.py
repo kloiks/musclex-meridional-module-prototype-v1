@@ -367,6 +367,51 @@ class TestTrackingCache(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "unet_w20", "tracks.csv")))
 
 
+class TestSmoothing(unittest.TestCase):
+    def test_series(self):
+        from plots import smooth_series
+        h, frames = np.arange(12.0), np.r_[0:6, 10:16]  # frames 6-9 excluded
+        h[2] = np.nan
+        np.testing.assert_array_equal(smooth_series(h, frames, 1), h)
+        odd, even = smooth_series(h, frames, 3), smooth_series(h, frames, 4)
+        self.assertTrue(np.isnan(odd[2]) and np.isnan(even[2]))
+        self.assertEqual((odd[4], odd[5], odd[6]), (4.0, 4.5, 6.5))  # not across the gap
+        self.assertEqual((even[4], even[9]), (4.0, 8.5))  # frames i-2 ... i+1, without the NaN
+
+    def test_viewer_defaults(self):
+        from viewer import Viewer
+        qt_app()
+        view = Viewer()
+        self.addCleanup(delete_widget, view)
+        for row in (view.height_smooth, view.background_smooth):
+            self.assertEqual((row.window, row.note), (10, " (mean of 10 frames)"))
+
+
+class TestPeaksField(unittest.TestCase):
+    def test_prefixes(self):
+        from labels import read_expected_peaks
+        from viewer import Viewer
+        qt_app()
+        view = Viewer()
+        self.addCleanup(delete_widget, view)
+        names = [name for name, _, _ in read_expected_peaks(PEAKS)] + ["X1", "X12"]
+
+        def shown(text):
+            view.peaks_edit.setText(text)
+            wanted = view.wanted_names()
+            return [n for n in names if wanted is None or wanted.match(n)]
+
+        self.assertEqual(shown(""), names)
+        self.assertEqual(shown("M1"), ["M1L-45.5", "M1"])
+        self.assertEqual(shown("X1"), ["X1"])
+        self.assertEqual(shown("X"), ["X1", "X12"])
+        self.assertEqual(shown("Tn"), ["Tn1", "Tn2", "Tn3", "Tn4"])
+        self.assertEqual(shown("M"), [n for n in names if n[0] == "M"])
+        self.assertEqual(shown("Z-15."), ["Z-15.48", "Z-15.4", "Z-15.15"])
+        self.assertEqual(shown(" M6, , Star"), ["Star", "M6L-45.5", "M6"])
+        self.assertEqual(shown("m3"), [])
+
+
 class TestRecording(unittest.TestCase):
     def test_scale_for(self):
         from recording import Recording

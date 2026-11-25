@@ -11,6 +11,7 @@ from recording import group_options, load_recording
 
 COLORS = ("#2b7fff", "#e8590c", "#2f9e44")
 UNMATCHED_COLOR = "#7a3fb5"
+SMOOTH_FRAMES = 10  # default window of the plotted peak heights and background
 BG_D_NM = (80.0, 3.0)  # d range (nm) over which the background panel integrates the background
 
 
@@ -38,7 +39,8 @@ class Viewer(QWidget):
         self.track_canvas, self.height_canvas = canvas(620), canvas(620)
         self.background_canvas = canvas(520)
         self.peaks_edit = QLineEdit(placeholderText="all peaks")
-        self.peaks_edit.setToolTip("Comma-separated names or prefixes (M2 = M2, M2L, M2-H-21.2 ...)")
+        self.peaks_edit.setToolTip("Comma-separated names or prefixes (M2 = M2, M2L, M2-H-21.2 ...; M1 is not M10; "
+                                   "Tn = every Tn). Capitals matter.")
         self.peaks_edit.editingFinished.connect(self.redraw)
         self.scale_box = QComboBox()
         self.scale_box.setToolTip("Frames averaged (sliding mean) in the kymographs, projections and background. "
@@ -50,9 +52,11 @@ class Viewer(QWidget):
         self.unmatched_box.toggled.connect(lambda _: self.redraw())
 
         self.time, self.range, self.contrast = TimeSliders(), RangeRows(), ContrastRow()
-        self.height_smooth = SmoothingRow("Smooth U-Net peak heights",
-                                          "tracks.csv and the projection labels keep the measured heights")
-        self.background_smooth = SmoothingRow("Smooth background", "the subtracted background stays the same")
+        self.height_smooth = SmoothingRow("Smooth peak heights",
+                                          "tracks.csv and the projection labels keep the measured heights",
+                                          SMOOTH_FRAMES)
+        self.background_smooth = SmoothingRow("Smooth background", "the subtracted background stays the same",
+                                              SMOOTH_FRAMES)
         self.time.moved.connect(lambda frame: self.set_time((frame + 0.5) * self.dt))
         self.time.stepped.connect(lambda n: self.time.move(n * self.grouping()))
         self.contrast.changed.connect(self.redraw_kymos)
@@ -104,9 +108,7 @@ class Viewer(QWidget):
             self.hide()
             return
         self.projections = []  # the old ones, until the redraw
-        unet = self.any_unet()
-        self.unmatched_box.setEnabled(unet)
-        self.height_smooth.box.setEnabled(unet)
+        self.unmatched_box.setEnabled(self.any_unet())
         self.t_max = max(r.t_end for r in self.recs)
         self.dt = min(r.dt for r in self.recs)
         last = max(0, round(self.t_max / self.dt) - 1)
@@ -144,9 +146,11 @@ class Viewer(QWidget):
         return (min(qs), max(qs)) if len(qs) > 1 and min(qs) < max(qs) else whole
 
     def wanted_names(self):
-        """Pattern of the names in the peaks field, or None (all)."""
+        """Pattern of the names in the peaks field, or None (all).  A name matches if it starts with one
+        of them; after a final digit no other digit may follow (M1 is not M10, but M is every M)."""
         tokens = [t.strip() for t in self.peaks_edit.text().split(",") if t.strip()]
-        return re.compile("|".join(rf"{re.escape(t)}(?!\d)" for t in tokens)) if tokens else None
+        patterns = [re.escape(t) + (r"(?!\d)" if t[-1].isdigit() else "") for t in tokens]
+        return re.compile("|".join(patterns)) if patterns else None
 
     # ---------------------------------------------------------------- drawing
 
@@ -262,26 +266,24 @@ class Viewer(QWidget):
         ax_h.set_ylabel("peak height above baseline", fontsize=9)
         at = f"at grouping scale {self.grouping()}"
         ax_t.set_title("U-Net tracks (per frame)" if unet else f"tracked peaks {at}", fontsize=9)
-        ax_h.set_title(f"U-Net peak heights (per frame){self.height_smooth.note}" if unet else f"peak heights {at}",
+        ax_h.set_title(("U-Net peak heights (per frame)" if unet else f"peak heights {at}") + self.height_smooth.note,
                        fontsize=9)
         for ax in (ax_t, ax_h):
-            style_time_axis(ax, self.t_max)
+            style_time_axis(ax, self.t_max, left_labels=True)
             if not any(self.shown):
                 ax.text(0.5, 0.5, "no tracks to show in range", transform=ax.transAxes, ha="center", color="grey")
         self.panel_lines = [time_line(ax) for ax in (ax_t, ax_h)]
 
     def draw_track(self, ax_t, ax_h, r, a, name):
-        """One track's position and height; returns the plotted heights."""
-        rr, h = r.r[r.k, a], r.height[r.k, a]
-        if r.detector == "unet":
-            h = smooth_series(h, r.frames, self.height_smooth.window)
+        """One track's position and height, named at both ends; returns the plotted heights."""
+        rr = r.r[r.k, a]
+        h = smooth_series(r.height[r.k, a], r.frames, self.height_smooth.window)
         h = np.where(np.isfinite(rr) & (h > 0), h, np.nan)
         for ax, y in ((ax_t, rr * r.inv), (ax_h, h)):
             self.plot_track(ax, r, rr, y, lw=1.3, color=r.color, ls="--" if a in r.unmatched else "-")
             seen = np.flatnonzero(np.isfinite(y))
-            if len(seen):
-                ax.text(r.times[seen[-1]], y[seen[-1]], f" {name}", fontsize=7, color=r.color, va="center",
-                        clip_on=True)
+            for i, text, side in ((seen[0], f"{name} ", "right"), (seen[-1], f" {name}", "left")) if len(seen) else ():
+                ax.text(r.times[i], y[i], text, ha=side, va="center", fontsize=7, color=r.color, clip_on=True)
         return h[np.isfinite(h)]
 
     def draw_background(self):

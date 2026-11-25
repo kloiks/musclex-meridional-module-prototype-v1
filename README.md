@@ -11,7 +11,7 @@ GUI: pick one to three `qf_results` folders, each with an optional `.ddf` and an
 **Run Unet Detection** runs the same steps but finds and links the peaks with a U-Net (`models/new_w61.pt`, needs PyTorch; GPU if available) in place of multiscale.
 **Grouping scale** in the viewer offers 1, 2, 4, 8 and 16 frames for both methods (plus multiscale's coarser scales): the kymographs, projections and background show the sliding mean of that many frames. U-Net tracks and heights stay per frame.
 Steps whose images, settings and inputs are unchanged are not repeated (hashes in the `.json` files, see `cache.py`).
-U-Net tracks that match no expected peak are named X1, X2, … from the centre out in each recording and drawn dashed; **Show unmatched tracks** hides them. **Smooth U-Net peak heights** (off by default) smooths the plotted heights only. **Smooth background** does the same for the background panel (both methods).
+U-Net tracks that match no expected peak are named X1, X2, … from the centre out in each recording and drawn dashed; **Show unmatched tracks** hides them. **Smooth peak heights** and **Smooth background** (both methods, 10 frames by default, 1 = off) smooth the plotted lines only.
 **Parameters…** also lists the **frames to exclude** per selected recording (both methods), numbered from 0 and filled in with the blank frames found; an edited list is kept in `<output>/excluded_frames.json` (**Auto** goes back).
 Beside the path fields: **Expected peaks…** edits `config/expected_peaks.csv` (names and d-spacings used to label tracks),
 **Parameters…** edits `config/parameters.json` (strip width, M3 search radius, force-figure range and the multiscale settings), and **Calibration…** sets the
