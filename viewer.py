@@ -3,7 +3,7 @@ import re
 
 import numpy as np
 from PySide6.QtCore import QSignalBlocker
-from PySide6.QtWidgets import QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from controls import ContrastRow, RangeRows, SmoothingRow, TimeSliders, canvas
 from plots import Projection, broken, d_ticks, panel_row, smooth_series, style_time_axis, time_line
@@ -11,21 +11,24 @@ from recording import group_options, load_recording
 
 COLORS = ("#2b7fff", "#e8590c", "#2f9e44")
 UNMATCHED_COLOR = "#7a3fb5"
+NO_FRAME = "frame dropped\nor outside"  # shown on the projections
 SMOOTH_FRAMES = 10  # default window of the plotted peak heights and background
-BG_D_NM = (80.0, 3.0)  # d range (nm) over which the background panel integrates the background
+BG_D_NM = ("3", "80")  # default d range (nm) of the background section
 
 
 class Viewer(QWidget):
     """Force/length overlay with a time slider; kymographs; tracked peaks (d and height) beside each
     recording's grouped projection at the slider time.  Every position axis is q = r * inv,
-    labelled in d (nm), so recordings with different calibrations line up."""
+    labelled in d (nm), so recordings with different calibrations line up.  The background section has
+    its own range and projection controls; it shares the time and the grouping."""
 
     def __init__(self):
         super().__init__()
         self.recs = []          # Recordings
         self.shown = []         # per recording: the [(track, name)] drawn
-        self.projections = []   # per recording: its three Projections (d, height, background)
-        self.force_lines, self.kymo_lines, self.panel_lines = [], [], []  # they follow the slider
+        self.projections = []   # per recording: its Projections of the tracks and the heights
+        self.bg_projections = []  # per recording: its Projection of the background section
+        self.force_lines, self.kymo_lines, self.track_lines, self.bg_lines = [], [], [], []  # at the slider time
         self.t_cur, self.t_max, self.dt = 0.0, 1.0, 1.0
         self.make_controls()
         self.make_layout()
@@ -41,7 +44,7 @@ class Viewer(QWidget):
         self.peaks_edit = QLineEdit(placeholderText="all peaks")
         self.peaks_edit.setToolTip("Comma-separated names or prefixes (M2 = M2, M2L, M2-H-21.2 ...; M1 is not M10; "
                                    "Tn = every Tn). Capitals matter.")
-        self.peaks_edit.editingFinished.connect(self.redraw)
+        self.peaks_edit.editingFinished.connect(self.redraw_tracks)
         self.scale_box = QComboBox()
         self.scale_box.setToolTip("Frames averaged (sliding mean) in the kymographs, projections and background. "
                                   "U-Net tracks and heights stay per frame.")
@@ -49,9 +52,10 @@ class Viewer(QWidget):
         self.unmatched_box = QCheckBox("Show unmatched tracks", checked=True)
         self.unmatched_box.setToolTip("U-Net tracks that match no expected peak, named X1, X2, ... from the "
                                       "centre out in each recording (dashed)")
-        self.unmatched_box.toggled.connect(lambda _: self.redraw())
+        self.unmatched_box.toggled.connect(lambda _: self.redraw_tracks())
 
-        self.time, self.range, self.contrast = TimeSliders(), RangeRows(), ContrastRow()
+        self.time, self.contrast = TimeSliders(), ContrastRow()
+        self.range, self.bg_range = RangeRows(), RangeRows(BG_D_NM)
         self.height_smooth = SmoothingRow("Smooth peak heights",
                                           "tracks.csv and the projection labels keep the measured heights",
                                           SMOOTH_FRAMES)
@@ -60,8 +64,10 @@ class Viewer(QWidget):
         self.time.moved.connect(lambda frame: self.set_time((frame + 0.5) * self.dt))
         self.time.stepped.connect(lambda n: self.time.move(n * self.grouping()))
         self.contrast.changed.connect(self.redraw_kymos)
-        for control in (self.range, self.height_smooth, self.background_smooth):
-            control.changed.connect(self.redraw)
+        for control in (self.range, self.height_smooth):
+            control.changed.connect(self.redraw_tracks)
+        for control in (self.bg_range, self.background_smooth):
+            control.changed.connect(self.redraw_background)
 
     def make_layout(self):
         layout = QVBoxLayout(self)
@@ -81,13 +87,25 @@ class Viewer(QWidget):
         kymo_row.addLayout(self.range.new_row(projection=False))
         layout.addLayout(kymo_row)
         layout.addLayout(self.time.new_row())
-        for c, smoothing in ((self.track_canvas, None), (self.height_canvas, self.height_smooth),
-                             (self.background_canvas, self.background_smooth)):
+        for c, smoothing in ((self.track_canvas, None), (self.height_canvas, self.height_smooth)):
             if smoothing:
                 layout.addLayout(smoothing.row)
             layout.addWidget(c)
             layout.addLayout(self.time.new_row())
             layout.addLayout(self.range.new_row(projection=True))
+        self.add_background_section(layout)
+
+    def add_background_section(self, layout):
+        """Set apart by a line and a subtitle; its range, at the top, is not linked to the others."""
+        subtitle = QLabel("Background intensity")
+        subtitle.setStyleSheet("font-weight: bold; font-size: 13pt")
+        layout.addSpacing(12)
+        layout.addWidget(QFrame(frameShape=QFrame.HLine, frameShadow=QFrame.Sunken))
+        layout.addWidget(subtitle)
+        layout.addLayout(self.bg_range.new_row(projection=True))
+        layout.addLayout(self.background_smooth.row)
+        layout.addWidget(self.background_canvas)
+        layout.addLayout(self.time.new_row())
 
     # ---------------------------------------------------------------- recordings
 
@@ -107,7 +125,7 @@ class Viewer(QWidget):
         if not self.recs:
             self.hide()
             return
-        self.projections = []  # the old ones, until the redraw
+        self.projections, self.bg_projections = [], []  # the old ones, until the redraw
         self.unmatched_box.setEnabled(self.any_unet())
         self.t_max = max(r.t_end for r in self.recs)
         self.dt = min(r.dt for r in self.recs)
@@ -132,13 +150,12 @@ class Viewer(QWidget):
     def grouping(self):
         return int(self.scale_box.currentText() or 1)
 
-    def q_range(self):
-        """(q_lo, q_hi) shown: the typed range, else every recording's radius from/to."""
+    def q_range(self, rows):
+        """(q_lo, q_hi) of the range applied in ``rows`` (RangeRows), else every recording's radius from/to."""
         whole = (min(r.params["rmin"] * r.inv for r in self.recs), max(r.params["rmax"] * r.inv for r in self.recs))
-        typed = self.range.typed_range()
-        if typed is None:
+        if rows.range is None:
             return whole
-        a, b, unit = typed
+        a, b, unit = rows.range
         if unit == "px":
             qs = [v * r.inv for r in self.recs for v in (a, b)]
         else:
@@ -155,21 +172,37 @@ class Viewer(QWidget):
     # ---------------------------------------------------------------- drawing
 
     def redraw(self):
-        if not self.recs:
-            return
-        self.q_shown = self.q_range()
-        wanted, unmatched = self.wanted_names(), self.unmatched_box.isChecked()
+        """Everything, at the grouping scale."""
         for r in self.recs:
             r.group_by(self.grouping())
+        self.redraw_background()
+        self.redraw_tracks()
+
+    def redraw_tracks(self):
+        """The kymographs, tracks and heights."""
+        if not self.recs:
+            return
+        self.q_shown = self.q_range(self.range)
+        wanted, unmatched = self.wanted_names(), self.unmatched_box.isChecked()
         self.shown = [r.tracks(self.q_shown, wanted, unmatched) for r in self.recs]
-        self.projections = [[] for _ in self.recs]
         self.draw_kymos()
         self.draw_tracks()
-        self.draw_background()
-        if self.range.xlim is None:  # show the fitted range (union over all panels)
-            autos = [p.auto for ps in self.projections for p in ps]
-            self.range.show_xlim((min(lo for lo, _ in autos), max(hi for _, hi in autos)))
+        self.show_fitted_x(self.range, [p for ps in self.projections for p in ps])
         self.set_time(self.t_cur)
+
+    def redraw_background(self):
+        """The background section."""
+        if not self.recs:
+            return
+        self.draw_background()
+        self.show_fitted_x(self.bg_range, self.bg_projections)
+        self.set_time(self.t_cur)
+
+    @staticmethod
+    def show_fitted_x(rows, projections):
+        """Without an x range set, show the fitted one (union over the projections)."""
+        if rows.xlim is None:
+            rows.show_xlim((min(p.auto[0] for p in projections), max(p.auto[1] for p in projections)))
 
     def redraw_kymos(self):
         if self.recs:
@@ -235,13 +268,11 @@ class Viewer(QWidget):
         ok = np.isfinite(rr)
         ax.plot(*broken(r.frames[ok], r.times[ok], y[ok]), **style)
 
-    def add_projections(self, axes, what, values):
-        """One projection per recording; x is fitted to the rows of ``values(r)`` in the shown range."""
-        for r, ax, projections in zip(self.recs, axes, self.projections):
-            inside = (r.q >= self.q_shown[0]) & (r.q <= self.q_shown[1])
-            if what == "bg" and not inside.any():
-                inside[:] = True
-            projections.append(Projection(ax, r, what, values(r)[inside], self.range.log, self.range.xlim))
+    def make_projections(self, axes, what, rows, q_range, values):
+        """One projection per recording with the x settings of ``rows``; x is fitted to ``values(r)``
+        in the q range."""
+        return [Projection(ax, r, what, values(r)[(r.q >= q_range[0]) & (r.q <= q_range[1])], rows.log, rows.xlim)
+                for r, ax in zip(self.recs, axes)]
 
     def draw_tracks(self):
         """Tracks (q, labelled in d) and, equally sized below, their heights; each beside one grouped
@@ -252,8 +283,9 @@ class Viewer(QWidget):
         ax_h, right_h = panel_row(self.height_canvas.figure, n, self.q_shown, share_q=False)
         heights = np.concatenate([np.empty(0)] + [self.draw_track(ax_t, ax_h, r, a, name)
                                                   for r, shown in zip(self.recs, self.shown) for a, name in shown])
-        self.add_projections(right_t, "d", lambda r: r.view.flats)
-        self.add_projections(right_h, "height", lambda r: r.view.flats)
+        self.projections = list(zip(*(
+            self.make_projections(axes, what, self.range, self.q_shown, lambda r: r.view.flats)
+            for axes, what in ((right_t, "d"), (right_h, "height")))))
         for pr in [] if unet else self.projections[0]:
             pr.ax.legend([pr.extra], ["noise × SNR threshold"], fontsize=6, loc="lower right", frameon=False)
 
@@ -272,7 +304,7 @@ class Viewer(QWidget):
             style_time_axis(ax, self.t_max, left_labels=True)
             if not any(self.shown):
                 ax.text(0.5, 0.5, "no tracks to show in range", transform=ax.transAxes, ha="center", color="grey")
-        self.panel_lines = [time_line(ax) for ax in (ax_t, ax_h)]
+        self.track_lines = [time_line(ax) for ax in (ax_t, ax_h)]
 
     def draw_track(self, ax_t, ax_h, r, a, name):
         """One track's position and height, named at both ends; returns the plotted heights."""
@@ -287,29 +319,30 @@ class Viewer(QWidget):
         return h[np.isfinite(h)]
 
     def draw_background(self):
-        """The background over time (integrated over q between d = 80 and 3 nm, from each grouped
-        profile's own hull or fit) beside each recording's grouped profile at the slider time with the
+        """The background over time (integrated over the section's range, from each grouped profile's
+        own hull or fit) beside each recording's grouped profile at the slider time with the
         background the tracker subtracted from it (dashed)."""
-        ax_b, right = panel_row(self.background_canvas.figure, len(self.recs), self.q_shown, share_q=False)
+        q_lo, q_hi = q_range = self.q_range(self.bg_range)
+        ax_b, right = panel_row(self.background_canvas.figure, len(self.recs), q_range, share_q=False)
         for r in self.recs:
-            band = (r.q >= 1.0 / BG_D_NM[0]) & (r.q <= 1.0 / BG_D_NM[1])  # area under the background
+            band = (r.q >= q_lo) & (r.q <= q_hi)  # area under the background
             area = np.trapezoid(r.view.backgrounds[band], r.q[band], axis=0)
             area = smooth_series(area, r.frames, self.background_smooth.window)
             ax_b.plot(*broken(r.frames, r.times, area), lw=1.3, color=r.color, label=r.label)
             if r.shared is not None:
                 ax_b.axhline(np.trapezoid(r.shared[band], r.q[band]), color=r.color, ls="--", lw=1,
                              label=f"{r.label}: averaged profile's (subtracted)")
-        self.add_projections(right, "bg", lambda r: r.view.profiles)
-        pr = self.projections[0][-1]
+        self.bg_projections = self.make_projections(right, "bg", self.bg_range, q_range, lambda r: r.view.profiles)
+        pr = self.bg_projections[0]
         pr.ax.legend([pr.extra], ["subtracted background"], fontsize=6, loc="lower right", frameon=False)
         modes = ", ".join(sorted({r.background_mode for r in self.recs}))
         note = self.background_smooth.note
-        ax_b.set_ylabel(f"background area, d {BG_D_NM[0]:g}–{BG_D_NM[1]:g} nm (I·nm⁻¹)", fontsize=9)
+        ax_b.set_ylabel(f"background area, d {1 / q_hi:.4g}–{1 / q_lo:.4g} nm (I·nm⁻¹)", fontsize=9)
         ax_b.set_title(f"background at grouping scale {self.grouping()}  (tracker subtracts: {modes})"
                        + (f" {note}" if note else ""), fontsize=9)
         style_time_axis(ax_b, self.t_max)
         ax_b.legend(fontsize=7, frameon=False)
-        self.panel_lines.append(time_line(ax_b))
+        self.bg_lines = [time_line(ax_b)]
 
     # ---------------------------------------------------------------- time
 
@@ -322,10 +355,12 @@ class Viewer(QWidget):
         if not self.recs:
             return
         self.t_cur = t
-        for line in self.force_lines + self.kymo_lines + self.panel_lines:
+        for line in self.force_lines + self.kymo_lines + self.track_lines + self.bg_lines:
             line.set_xdata([t, t])
         for r, shown, projections in zip(self.recs, self.shown, self.projections):
             self.show_projections(r, shown, projections, r.column_at(t))
+        for r, pr in zip(self.recs, self.bg_projections):
+            self.show_background(r, pr, r.column_at(t))
         self.time.set_text(f"{t:.4f} s")
         for c in (self.force_canvas, self.kymo_canvas, self.track_canvas, self.height_canvas,
                   self.background_canvas):
@@ -334,13 +369,18 @@ class Viewer(QWidget):
     def show_projections(self, r, shown, projections, col):
         if col is None:
             for pr in projections:
-                pr.clear("frame dropped\nor outside")
+                pr.clear(NO_FRAME)
             return
         c = r.column(col)
         peaks = r.peaks_at(col, c.flat, shown, self.q_shown)
         threshold = None if r.detector == "unet" else r.threshold * c.sigma  # the U-Net has no SNR threshold
         for pr in projections:
-            if pr.what == "bg":
-                pr.show(r.q, c.profile, c.background)
-            else:
-                pr.show(r.q, c.flat, threshold, peaks)
+            pr.show(r.q, c.flat, threshold, peaks)
+
+    @staticmethod
+    def show_background(r, pr, col):
+        if col is None:
+            pr.clear(NO_FRAME)
+            return
+        c = r.column(col)
+        pr.show(r.q, c.profile, c.background)

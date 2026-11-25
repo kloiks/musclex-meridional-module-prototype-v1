@@ -124,15 +124,18 @@ class TimeSliders(QObject):
 
 
 class RangeRows(QObject):
-    """The d range of all panels (Enter or "Apply range"; "Show whole" clears it) and the scale and
-    range of the projections' x axis (Enter or "Apply" fixes it; "Auto", or changing the scale, fits it
-    again and shows the fitted range)."""
+    """The d range of some panels (Enter or "Apply range"; "Show whole" clears it) and the scale and
+    range of their projections' x axis (Enter or "Apply" fixes it; "Auto", or changing the scale, fits
+    it again and shows the fitted range)."""
     changed = Signal()
 
-    def __init__(self):
+    def __init__(self, default=("", "")):
+        """``default``: the texts of the d range (nm) at the start; empty = whole."""
         super().__init__()
         self.ranges, self.units, self.scales, self.xranges = [], [], [], []
-        self.xlim = None  # None: fitted
+        self.default = default
+        self.range = None  # (from, to, unit) applied; None: whole
+        self.xlim = None   # None: fitted
 
     def new_row(self, projection):
         items = self.range_items()
@@ -145,6 +148,7 @@ class RangeRows(QObject):
         hi = make_edit("radius to", lambda: self.apply_range(lo, hi))
         self.ranges.append((lo, hi))
         self.units.append(unit)
+        self.fill_range(*self.default)
         return ("Range", lo, "to", hi, unit, make_button("Apply range", lambda: self.apply_range(lo, hi)),
                 make_button("Show whole", self.clear_range))
 
@@ -166,15 +170,16 @@ class RangeRows(QObject):
         self.set_range("", "")
 
     def set_range(self, a, b):
-        for lo, hi in self.ranges:
-            lo.setText(a)
-            hi.setText(b)
+        self.fill_range(a, b)
         self.changed.emit()
 
-    def typed_range(self):
-        """(from, to, unit) as typed, or None if a field is not a number."""
-        a, b = (number(edit) for edit in self.ranges[0])  # the rows are kept in step
-        return None if a is None or b is None else (a, b, self.units[0].currentText())
+    def fill_range(self, a, b):
+        """Put the texts in every row and apply them (whole, if one is not a number)."""
+        for edits in self.ranges:
+            for edit, text in zip(edits, (a, b)):
+                edit.setText(text)
+        lo, hi = (number(edit) for edit in self.ranges[0])
+        self.range = None if lo is None or hi is None else (lo, hi, self.units[0].currentText())
 
     @property
     def log(self):

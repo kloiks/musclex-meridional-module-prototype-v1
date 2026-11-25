@@ -12,6 +12,7 @@ GUI: pick one to three `qf_results` folders, each with an optional `.ddf` and an
 **Grouping scale** in the viewer offers 1, 2, 4, 8 and 16 frames for both methods (plus multiscale's coarser scales): the kymographs, projections and background show the sliding mean of that many frames. U-Net tracks and heights stay per frame.
 Steps whose images, settings and inputs are unchanged are not repeated (hashes in the `.json` files, see `cache.py`).
 U-Net tracks that match no expected peak are named X1, X2, … from the centre out in each recording and drawn dashed; **Show unmatched tracks** hides them. **Smooth peak heights** and **Smooth background** (both methods, 10 frames by default, 1 = off) smooth the plotted lines only.
+The **Background intensity** section at the bottom has its own range (3–80 nm by default) and projection axis controls, not linked to the others; its range also sets where the area under the background is computed. It shares the time sliders and the grouping.
 **Parameters…** also lists the **frames to exclude** per selected recording (both methods), numbered from 0 and filled in with the blank frames found; an edited list is kept in `<output>/excluded_frames.json` (**Auto** goes back).
 Beside the path fields: **Expected peaks…** edits `config/expected_peaks.csv` (names and d-spacings used to label tracks),
 **Parameters…** edits `config/parameters.json` (strip width, M3 search radius, force-figure range and the multiscale settings), and **Calibration…** sets the

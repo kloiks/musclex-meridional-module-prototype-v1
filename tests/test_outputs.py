@@ -387,6 +387,66 @@ class TestSmoothing(unittest.TestCase):
             self.assertEqual((row.window, row.note), (10, " (mean of 10 frames)"))
 
 
+class TestBackgroundSection(unittest.TestCase):
+    """Its range and x controls are its own, and set the area; tracks and heights have theirs."""
+
+    def test_independent(self):
+        from recording import Recording
+        from viewer import Viewer
+        qt_app()
+        view = Viewer()
+        self.addCleanup(delete_widget, view)
+        pos, n = np.arange(40, 400), 30
+        base = np.random.default_rng(0).poisson(500 * np.exp(-pos / 100.0)[:, None] + 50, (len(pos), n)) * 1.0
+        view.recs = [Recording(
+            label="a", color="k", traces=[], dt=0.01, inv=1e-3, detector="unet", n_source=n, pos=pos, base=base,
+            params=dict(multiscale.DEFAULTS, rmax=399), frames=np.arange(n), scales=np.array([1]),
+            r=np.full((1, 1, n), 150.0), height=np.full((1, 1, n), 5.0), labels={0: "M5"}, unmatched={})]
+        view.refresh(keep_grouping=False)
+        rec, d_pr = view.recs[0], view.projections[0][0]
+
+        def check_area(q_lo, q_hi):
+            band = (rec.q >= q_lo) & (rec.q <= q_hi)
+            expected = np.trapezoid(rec.view.backgrounds[band], rec.q[band], axis=0)
+            line = view.background_canvas.figure.axes[0].lines[0]
+            np.testing.assert_allclose(line.get_ydata(), expected)
+
+        view.background_smooth.box.setValue(1)
+        self.assertEqual(view.bg_range.range, (3.0, 80.0, "d (nm)"))
+        check_area(1 / 80, 1 / 3)
+        self.assertIs(view.projections[0][0], d_pr)  # the other panels were not redrawn
+        bg_pr = view.bg_projections[0]
+
+        view.range.set_range("20", "5")  # the other panels' range and scale: the section stays
+        view.range.set_scale("linear")
+        view.range.set_xlim((1.0, 9.0))
+        self.assertIs(view.bg_projections[0], bg_pr)
+        self.assertEqual(bg_pr.ax.get_xscale(), "log")
+        check_area(1 / 80, 1 / 3)
+
+        d_pr = view.projections[0][0]
+        view.bg_range.set_range("10", "4")  # the section's own range: view and area follow, the others stay
+        view.bg_range.set_xlim((2.0, 700.0))
+        check_area(1 / 10, 1 / 4)
+        bg_pr = view.bg_projections[0]
+        np.testing.assert_allclose(bg_pr.ax.get_ylim(), (0.1, 0.25))
+        self.assertEqual(bg_pr.ax.get_xlim(), (2.0, 700.0))
+        self.assertIn("d 4–10 nm", view.background_canvas.figure.axes[0].get_ylabel())
+        self.assertIs(view.projections[0][0], d_pr)
+        self.assertEqual(d_pr.ax.get_xlim(), (1.0, 9.0))
+
+        view.bg_range.units[0].setCurrentText("px")  # a unit counts only once applied
+        view.scale_box.setCurrentText("4")
+        check_area(1 / 10, 1 / 4)
+        view.bg_range.set_range("100", "300")
+        check_area(0.1, 0.3)
+        view.bg_range.clear_range()
+        check_area(0.0, 1.0)
+        view.time.move(10)  # time is shared
+        self.assertEqual(view.bg_projections[0].line.get_xdata().tolist(),
+                         np.clip(rec.column(rec.column_at(view.t_cur)).profile, 2.0, None).tolist())
+
+
 class TestPeaksField(unittest.TestCase):
     def test_prefixes(self):
         from labels import read_expected_peaks
