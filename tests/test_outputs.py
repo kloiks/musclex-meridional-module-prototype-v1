@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,8 @@ import kymo_force
 import kymograph
 import multiscale
 import unet
-from calibrate_m3 import calibrate_file
+from calibrate_m3 import calibrate_file, meridional_profile
+from frames import blank_frames
 
 STRUCTURE = os.environ.get("KYMO_TEST_DATA", "/home/irina/data/2026_09_22_Hessel/EDL_Lo/Passive/structure")
 RECORDINGS = ("WT4_RigA_LoPassive2_0071", "WT4_RigA_LoPassive1_0070")
@@ -51,6 +53,23 @@ except ImportError:
 # the U-Net runs in half precision on the GPU, so another GPU may differ slightly
 UNET_TOL = dict(rtol=2e-2, atol=2e-2)
 TOL = dict(rtol=1e-5, atol=1e-8)
+
+
+APP = []  # the one QApplication, kept alive until every widget is gone
+
+
+def qt_app():
+    from PySide6.QtWidgets import QApplication
+    if not APP:
+        APP.append(QApplication.instance() or QApplication([]))
+
+
+def delete_widget(widget):
+    """Delete a widget now: left to the interpreter's exit, the order can crash Qt."""
+    import shiboken6
+    APP[0].processEvents()  # pending redraws first
+    if shiboken6.isValid(widget):
+        shiboken6.delete(widget)
 
 
 def have_data(rec):
@@ -160,11 +179,11 @@ class TestRecordings(unittest.TestCase):
         """Both detectors offer groupings 1, 2, 4, 8, 16, and each one is shown."""
         if len(self.out) < len(RECORDINGS):
             self.skipTest(f"no data in {STRUCTURE}")
-        from PySide6.QtWidgets import QApplication
         from viewer import GROUPS, Viewer
-        app = QApplication.instance() or QApplication([])
+        qt_app()
         for detector in ("multiscale", "unet"):
             view = Viewer()
+            self.addCleanup(delete_widget, view)
             view.load([(rec, os.path.join(out, f"meridian_w{W}_g1.npy"), "", os.path.join(out, f"{detector}_w{W}"))
                        for rec, out in self.out.items()])
             offered = [int(view.scale_box.itemText(i)) for i in range(view.scale_box.count())]
@@ -179,7 +198,6 @@ class TestRecordings(unittest.TestCase):
                         np.testing.assert_allclose(ms["grouped"][s], multiscale.bin_time(ms["base"], s))
                         self.assertEqual(ms["scales"][r["k"]], s if detector == "multiscale" else 1)
             view.close()
-        app.processEvents()
 
 
 class TestKymographCache(unittest.TestCase):
@@ -235,6 +253,113 @@ class TestKymographCache(unittest.TestCase):
             np.testing.assert_array_equal(grouped[:, 0], one[:, :g].sum(axis=1))
         self.write(0, 500)
         self.assertEqual(self.make(group=2)[0][0, 0], 20 * (500 + 2))  # not the old grouped file
+
+
+class TestUnetCache(unittest.TestCase):
+    """The U-Net is rerun for the settings it uses, and only for those (the net itself is replaced)."""
+
+    def test_settings(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        npy = os.path.join(tmp, "meridian_w20_g1.npy")
+        np.save(npy, np.random.default_rng(0).poisson(100, (200, 30)).astype(float))
+        with open(npy[:-4] + ".json", "w") as f:
+            json.dump(dict(pos_start=0, inv_nm_per_pixel=1e-3), f)
+        calls = []
+
+        def heatmap(x):
+            calls.append(1)
+            return np.exp(-0.5 * ((np.arange(len(x)) - 100) / 2.0) ** 2)[:, None] * np.ones(x.shape[1])
+
+        with unittest.mock.patch.object(unet, "heatmap", heatmap):
+            def rerun(**changes):
+                n = len(calls)
+                unet.process(npy, os.path.join(tmp, "unet"), dict(PARAMS, **changes), PEAKS)
+                return len(calls) > n
+            self.assertTrue(rerun())
+            for same in (dict(), dict(snr_coarse=9.0), dict(corridor=9.0), dict(noise_win=9), dict(base=3),
+                         dict(dark_fraction=0.06), dict(tol_pct=3.0)):
+                self.assertFalse(rerun(**same), same)
+            for other in (dict(unet_threshold=0.5), dict(rmax=150), dict(smooth=3), dict(background="averaged")):
+                self.assertTrue(rerun(**other), other)
+
+
+class TestStripAndBlankFrames(unittest.TestCase):
+    def test_calibration_and_kymograph_use_the_same_strip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            img = np.random.default_rng(0).random((60, 60)).astype(np.float32)
+            path = os.path.join(tmp, "f_1.tif")
+            Image.fromarray(img).save(path)
+            for width in (1, 20, 21):
+                kymo, _ = kymograph.build_kymograph([path], width)
+                radii, folded = meridional_profile(np.asarray(img, dtype=float), width)
+                below = img[30 - radii, 30 - width // 2:30 - width // 2 + width].sum(axis=1)
+                np.testing.assert_allclose(folded - kymo[radii, 0], below, rtol=1e-5)
+
+    def test_beam_off_spans_follow_blank_frames(self):
+        for dark, fraction in ((slice(8, 12), 0.05), (slice(0, 14), 0.05), (slice(8, 12), 0.5)):
+            kymo = np.full((10, 20), 100.0)
+            kymo[:, dark] = 0.1 if fraction == 0.05 else 30.0
+            spans = kymo_force.dark_spans(kymo, 0.0, 1.0, fraction)
+            self.assertEqual(spans, [(dark.start, dark.stop)])
+            blank = blank_frames(kymo.sum(axis=0), fraction, 0)
+            self.assertEqual(np.flatnonzero(blank).tolist(), list(range(dark.start, dark.stop)))
+
+
+class TestCalibrationDialog(unittest.TestCase):
+    """What Save writes after each way of setting M3 (auto M3: 60 px in frame 1, 70 px in frame 2)."""
+
+    def setUp(self):
+        qt_app()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        qf = os.path.join(self.tmp, "rec", "qf_results")
+        os.makedirs(qf)
+        r = np.abs(np.arange(201) - 100)
+        for i, peak in enumerate((60, 70), 1):
+            profile = 200.0 - r + 50 * np.exp(-0.5 * ((r - peak) / 2.0) ** 2)
+            Image.fromarray(np.repeat(profile[:, None], 201, axis=1).astype(np.float32)).save(
+                os.path.join(qf, f"f_{i}.tif"))
+        self.job = (qf, None, os.path.join(self.tmp, "out"))
+        self.path = os.path.join(self.job[2], "calibration.json")
+
+    def dialog(self, frame=1):
+        from dialogs import CalibrationDialog
+        d = CalibrationDialog(None, [self.job], 20, 30, 14.34)
+        self.addCleanup(delete_widget, d)
+        d.frame_box.setValue(frame)
+        return d, d.recs[0]
+
+    def saved(self, d):
+        d.save()
+        with open(self.path) as f:
+            cal = json.load(f)
+        return cal["n_m3_pixels"], cal["manual"], cal["set_on_frame"]
+
+    def test_untouched_is_not_written(self):
+        self.dialog(frame=2)[0].save()
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_typed_then_auto_on_frame_1(self):
+        d, r = self.dialog()
+        r["box"].setValue(65.0)
+        self.assertEqual(self.saved(d), (65.0, True, 1))
+        d, r = self.dialog()  # opened again: shown as saved, and Auto undoes it
+        self.assertEqual((r["box"].value(), r["manual"]), (65.0, True))
+        d.set_auto(r)
+        self.assertEqual(self.saved(d), (60.0, False, 1))
+
+    def test_auto_on_another_frame_is_manual(self):
+        d, r = self.dialog(frame=2)
+        d.set_auto(r)
+        d.frame_box.setValue(1)  # looking at another frame afterwards changes nothing
+        self.assertEqual(self.saved(d), (70.0, True, 2))
+
+    def test_typing_the_automatic_value_is_manual(self):
+        d, r = self.dialog()
+        r["box"].setValue(61.0)
+        r["box"].setValue(60.0)
+        self.assertEqual(self.saved(d), (60.0, True, 1))
 
 
 def update():

@@ -65,7 +65,8 @@ class Worker(QThread):
                 npy, cached = make_kymograph(qf, out, self.width, 1, cal["inv_nm_per_pixel"])
                 self.log.emit(f"wrote {npy}" + (" (from cached per-frame kymograph)" if cached else ""))
                 if ddf:
-                    self.log.emit(kymo_force(npy, ddf, (p["pos_lo"], p["pos_hi"]), p["stretch"]))
+                    self.log.emit(kymo_force(npy, ddf, (p["pos_lo"], p["pos_hi"]), p["stretch"],
+                                             dark_fraction=p["dark_fraction"]))
                 ms_dir = os.path.join(out, f"{self.detector.__name__}_w{self.width}")
                 summary, cached = self.detector.process(npy, ms_dir, p, PEAKS_CSV, load_excluded(out))
                 self.log.emit(summary + (" (cached tracking)" if cached else ""))

@@ -35,8 +35,8 @@ from labels import label_tracks, read_expected_peaks, unmatched_names, write_lab
 
 MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "new_w61.pt")
 DEFAULTS = dict(unet_threshold=0.4, unet_gate=10, unet_memory=10, unet_min_length=20)
-# the keys that change tracks or heights (and the settings the viewer needs)
-KEYS = list(DEFAULTS) + multiscale.TRACK_KEYS
+# the keys that change tracks or heights; the blank-frame settings count through dropped_frames
+KEYS = list(DEFAULTS) + ["rmin", "rmax", "background", "bg_method", "bg_comp2", "bg_neg_weight", "smooth"]
 
 
 # ------------------------------------------------------------------ model

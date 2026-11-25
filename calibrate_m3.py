@@ -24,7 +24,8 @@ D_M3_NM = 14.34  # 42.9 / 3
 def meridional_profile(img, gap):
     """Meridian strip of width ``gap`` summed across, folded about the centre by radius."""
     cy, cx = img.shape[0] // 2, img.shape[1] // 2
-    mer = img[:, cx - gap // 2:cx + gap // 2].sum(axis=1)
+    left = cx - gap // 2  # the same columns as kymograph.build_kymograph, odd widths too
+    mer = img[:, left:left + gap].sum(axis=1)
     radii = np.arange(min(cy, len(mer) - 1 - cy) + 1)
     return radii, mer[cy - radii] + mer[cy + radii]
 
@@ -46,11 +47,10 @@ def from_m3(n_m3, d_m3=D_M3_NM):
 
 
 def save_projection_png(radii, folded, n_m3, rmin, path):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig = Figure(figsize=(10, 4))
+    ax = fig.subplots()
     ax.plot(radii, folded, lw=1.0, color="black", label="meridional projection (hull subtracted)")
     ax.axvspan(0, rmin, color="grey", alpha=0.2, label=f"rmin = {rmin}")
     ax.axvline(n_m3, color="red", ls="--", label=f"M3 @ {n_m3} px")
@@ -59,7 +59,6 @@ def save_projection_png(radii, folded, n_m3, rmin, path):
     ax.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=150)
-    plt.close(fig)
 
 
 def calibrate_file(image, gap, rmin, out_json, debug_png=None, d_m3=D_M3_NM):

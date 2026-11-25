@@ -364,8 +364,10 @@ class BackgroundDialog(QDialog):
 class CalibrationDialog(QDialog):
     """Set the M3 radius (hence px -> nm) per recording on its background-subtracted projection.
 
-    Click a plot (with the toolbar's zoom/pan off) or type the radius; Save writes
-    <output>/calibration.json marked manual, which later runs keep.
+    Click a plot (with the toolbar's zoom/pan off) or type the radius: Save then writes
+    <output>/calibration.json marked manual, which later runs keep.  "Auto" on frame 1 goes back to
+    the automatic calibration; on another frame it counts as manual (runs calibrate on frame 1).
+    Recordings whose radius was not set here are not written.
     """
 
     def __init__(self, parent, jobs, width, rmin, d_m3):
@@ -397,7 +399,7 @@ class CalibrationDialog(QDialog):
             r["box"] = QDoubleSpinBox(minimum=1.0, maximum=1e5, decimals=1, suffix=" px")
             r["info"] = QLabel()
             auto = QPushButton("Auto")
-            auto.clicked.connect(lambda _=False, r=r: r["box"].setValue(r["auto"]))
+            auto.clicked.connect(lambda _=False, r=r: self.set_auto(r))
             form.addWidget(QLabel(r["label"]), i + 1, 0)
             form.addWidget(r["box"], i + 1, 1)
             form.addWidget(auto, i + 1, 2)
@@ -424,9 +426,11 @@ class CalibrationDialog(QDialog):
             data, radii, folded = calibrate(img, self.width, self.rmin, self.d_m3)
             r["auto"] = float(data["n_m3_pixels"])
             if init:
-                manual = r["cal"] and r["cal"].get("gap_pixels") == self.width
-                r["box"].setValue(float(r["cal"]["n_m3_pixels"]) if manual else r["auto"])
-                r["box"].valueChanged.connect(lambda _=0, r=r: self.update_marker(r))
+                saved = r["cal"] and r["cal"].get("gap_pixels") == self.width
+                r["box"].setValue(float(r["cal"]["n_m3_pixels"]) if saved else r["auto"])
+                # frame: the one the radius was set on in this window, None = not set here
+                r["manual"], r["frame"] = bool(saved and r["cal"].get("manual")), None
+                r["box"].valueChanged.connect(lambda _=0, r=r: self.mark_set(r, manual=True))
             ax.plot(radii, folded, lw=1, color="black")
             ax.axvspan(0, self.rmin, color="grey", alpha=0.15, lw=0)
             ax.axvline(r["auto"], color="grey", ls=":", lw=1)
@@ -440,11 +444,20 @@ class CalibrationDialog(QDialog):
         axes[-1].set_xlabel("radius from centre (px)")
         self.canvas.draw_idle()
 
+    def mark_set(self, r, manual):
+        r["manual"], r["frame"] = manual, self.frame_box.value()
+        self.update_marker(r)
+
+    def set_auto(self, r):
+        r["box"].setValue(r["auto"])
+        self.mark_set(r, manual=self.frame_box.value() != 1)
+
     def update_marker(self, r, redraw=True):
         n = r["box"].value()
         r["line"].set_xdata([n, n])
         cal = from_m3(n, self.d_m3)
-        r["info"].setText(f"lambda_sdd = {cal['lambda_sdd']:.1f} nm·px,  {cal['inv_nm_per_pixel']:.4g} nm⁻¹/px")
+        r["info"].setText(f"lambda_sdd = {cal['lambda_sdd']:.1f} nm·px,  {cal['inv_nm_per_pixel']:.4g} nm⁻¹/px  "
+                          f"({'manual' if r['manual'] else 'automatic'})")
         if redraw:
             self.canvas.draw_idle()
 
@@ -457,11 +470,11 @@ class CalibrationDialog(QDialog):
 
     def save(self):
         for r in self.recs:
+            if r["frame"] is None:
+                continue
             os.makedirs(os.path.dirname(r["path"]), exist_ok=True)
             cal = dict(from_m3(r["box"].value(), self.d_m3), rmin_pixels=self.rmin, gap_pixels=self.width,
-                       image=os.path.abspath(r["frames"][0]), manual=r["box"].value() != r["auto"]
-                       or bool(r["cal"] and r["cal"].get("manual")),
-                       set_on_frame=self.frame_box.value())
+                       image=os.path.abspath(r["frames"][0]), manual=r["manual"], set_on_frame=r["frame"])
             with open(r["path"], "w") as f:
                 json.dump(cal, f, indent=2)
         self.accept()

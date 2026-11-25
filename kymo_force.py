@@ -25,16 +25,17 @@ import re
 from dataclasses import dataclass, field
 
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import MaxNLocator
 
 import cache
+from frames import blank_frames
 
 CACHE_VERSION = 1           # raise when the figure or CSVs change, so saved ones are made again
 DEFAULT_FRAME_TIME = 0.005  # s
-DARK_FRACTION = 0.05        # of the median column sum => beam off
+DARK_FRACTION = 0.05        # of the median column sum => beam off (default; the GUI's dark_fraction)
 DPI = 150
 FORCE_COLOR, LENGTH_COLOR, SPAN_COLOR, EVENT_COLOR = "#2b7fff", "#00a47d", "#d93025", "#8430ce"
 
@@ -182,13 +183,9 @@ def detector_frame_time(qf_folder):
 
 # ------------------------------------------------------------------ events
 
-def dark_spans(kymo, t0, dt):
-    """(start, stop) seconds of runs of columns with no beam."""
-    totals = np.nansum(kymo, axis=0)
-    median = np.nanmedian(totals)
-    if not median > 0:
-        return []
-    dark = np.flatnonzero(totals < DARK_FRACTION * median)
+def dark_spans(kymo, t0, dt, dark_fraction):
+    """(start, stop) seconds of runs of columns with no beam (frames.blank_frames, not padded)."""
+    dark = np.flatnonzero(blank_frames(np.nansum(kymo, axis=0), dark_fraction, 0))
     spans = []
     for run in np.split(dark, np.flatnonzero(np.diff(dark) > 1) + 1) if dark.size else []:
         spans.append((t0 + run[0] * dt, t0 + (run[-1] + 1) * dt))
@@ -314,7 +311,7 @@ def build_figure(kymo, pos, t0, dt, traces, spans, marks, inv_nm, stretch, title
     total_h = kymo_h + trace_h * len(traces) + top_pad + bottom_pad
     left, right = 0.075, 0.845
 
-    fig = plt.figure(figsize=(13, total_h), dpi=DPI)
+    fig = Figure(figsize=(13, total_h), dpi=DPI)
     grid = fig.add_gridspec(1 + len(traces), 1, height_ratios=[kymo_h] + [trace_h] * len(traces),
                             hspace=0.12, left=left, right=right,
                             top=1 - top_pad / total_h, bottom=bottom_pad / total_h)
@@ -371,11 +368,11 @@ def build_figure(kymo, pos, t0, dt, traces, spans, marks, inv_nm, stretch, title
     axes[-1].set_xlabel("time from trigger (s)", fontsize=9)
     ax_k.set_xlim(t0, t_end)
 
-    handles = [plt.Line2D([], [], lw=0.9, color=SPAN_COLOR, ls=(0, (4, 3)), label="kymograph span")]
+    handles = [Line2D([], [], lw=0.9, color=SPAN_COLOR, ls=(0, (4, 3)), label="kymograph span")]
     if spans:
-        handles.append(plt.Rectangle((0, 0), 1, 1, fc="#9aa0a6", alpha=0.3, label="beam off"))
+        handles.append(Rectangle((0, 0), 1, 1, fc="#9aa0a6", alpha=0.3, label="beam off"))
     if marks:
-        handles.append(plt.Line2D([], [], lw=0.9, color=EVENT_COLOR, ls=(0, (2, 2)), label="length change"))
+        handles.append(Line2D([], [], lw=0.9, color=EVENT_COLOR, ls=(0, (2, 2)), label="length change"))
     fig.legend(handles=handles, fontsize=8, frameon=False, ncol=len(handles),
                loc="lower right", bbox_to_anchor=(right, 0.08 / total_h))
     fig.text(left, 1 - 0.26 / total_h, title, fontsize=12, va="top")
@@ -421,7 +418,7 @@ def column_time(meta, ddf=None, frame_time=None):
     return t0, raw_dt * meta.get("group", 1), raw_dt, dt_source, how
 
 
-def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None):
+def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None, dark_fraction=DARK_FRACTION):
     """Write <base>_force.png, _events.csv and _traces.csv, or keep them if <base>_force.json says
     they were made from the same data and settings; returns a summary string."""
     kymo = np.load(npy)
@@ -432,7 +429,7 @@ def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None)
 
     key = dict(version=CACHE_VERSION, kymo_sha256=cache.array_hash(kymo), meta=meta, ddf=os.path.abspath(ddf_path),
                ddf_sha256=cache.file_hash(ddf_path), pos_range=list(pos_range), stretch=stretch,
-               frame_time=frame_time, detector_frame_time=detector_frame_time(meta["source"]))
+               dark_fraction=dark_fraction, frame_time=frame_time, detector_frame_time=detector_frame_time(meta["source"]))
     saved = cache.read_json(base + "_force.json")
     if cache.matches(saved, key) and "summary" in saved and all(
             os.path.exists(base + end) for end in ("_force.png", "_events.csv", "_traces.csv")):
@@ -450,11 +447,11 @@ def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None)
         raise ValueError(f"pos range {pos_range} keeps no rows (kymograph covers {pos[0]}..{pos[-1]})")
     kymo_c, pos_c = kymo[keep], pos[keep]
 
-    spans = dark_spans(kymo, t0, dt)
+    spans = dark_spans(kymo, t0, dt, dark_fraction)
     length = next((tr for tr in traces if tr["key"] == "length"), None)
     moves = length_changes(length["t"], length["y"]) if length else []
 
-    rec =os.path.basename(os.path.dirname(meta["source"]))
+    rec = os.path.basename(os.path.dirname(meta["source"]))
     title = f"{rec} — kymograph with {ddf.name} mechanics"
     subtitle = (f"{os.path.basename(base)}  ·  positions {pos_c[0]}–{pos_c[-1]} px  ·  "
                 f"{n_frames} columns of {group} frame(s) at {raw_dt * 1e3:g} ms ({dt_source})\n"
@@ -463,7 +460,6 @@ def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None)
                        [(m["start"], m["end"]) for m in moves],
                        meta.get("inv_nm_per_pixel"), stretch, title, subtitle)
     fig.savefig(base + "_force.png", dpi=DPI, facecolor="white")
-    plt.close(fig)
 
     events = collect_events(moves, length["units"] if length else "", spans, protocol, t0, t_end)
     write_events(base + "_events.csv", events, traces, t0, dt, n_frames)

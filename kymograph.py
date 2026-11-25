@@ -21,9 +21,7 @@ import re
 
 import numpy as np
 from PIL import Image
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 import cache
 
@@ -63,7 +61,8 @@ def group_frames(kymo, n):
 def plot_kymograph(kymo, pos, title, out_png, group=1, inv_nm_per_pixel=None):
     disp = np.log1p(np.clip(kymo, 0, None))
     vmin, vmax = np.percentile(disp, PERCENTILES)
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig = Figure(figsize=(11, 6))
+    ax = fig.subplots()
     im = ax.imshow(disp, aspect="auto", origin="lower", cmap="viridis", vmin=vmin, vmax=vmax,
                    extent=[0.5, kymo.shape[1] + 0.5, pos[0], pos[-1]])
     ax.set_xlabel("frame" if group == 1 else f"frame group ({group} frames each)")
@@ -77,7 +76,6 @@ def plot_kymograph(kymo, pos, title, out_png, group=1, inv_nm_per_pixel=None):
           .set_ylabel("q (nm$^{-1}$)")
     fig.tight_layout()
     fig.savefig(out_png, dpi=150)
-    plt.close(fig)
 
 
 def cached_frames_kymograph(frames, out_dir, width):
