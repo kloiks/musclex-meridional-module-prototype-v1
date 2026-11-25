@@ -15,8 +15,6 @@
   "corridor": 4.0,
   "base": 2,
   "min_cov": 0.5,
-  "select": "nearest",
-  "ref": "coarse",
   "seed_anchors": "yes",
   "dark_fraction": 0.05,
   "drop_pad": 1,

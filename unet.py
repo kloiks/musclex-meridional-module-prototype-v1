@@ -18,9 +18,7 @@ Writes to ``out_dir``: run.json, unet.npz, tracks.csv, labels.csv.
 Example:
     python unet.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv
 """
-import argparse
 import csv
-import json
 import os
 
 import numpy as np
@@ -29,8 +27,9 @@ from scipy.optimize import linear_sum_assignment
 
 import cache
 import multiscale
+import tracking
 from background import column_backgrounds, shared_background, smoothed
-from frames import excluded_mask, format_frames, parse_frames
+from frames import format_frames
 from labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
 
 MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "new_w61.pt")
@@ -149,113 +148,96 @@ def link(frame, r, score, gate, memory, min_length):
         at = np.flatnonzero(frame == f)
         at = at[np.argsort(r[at])]
         live = [t for t in live if f - t[-1][0] <= memory + 1]
+        points = [(int(f), float(r[i]), float(score[i])) for i in at]
         pairs = match(np.abs(np.array([t[-1][1] for t in live])[:, None] - r[at][None, :]), gate) if live else []
         for a, b in pairs:
-            live[a].append((int(f), float(r[at[b]]), float(score[at[b]])))
+            live[a].append(points[b])
         for b in sorted(set(range(len(at))) - {b for _, b in pairs}):
-            live.append([(int(f), float(r[at[b]]), float(score[at[b]]))])
+            live.append([points[b]])
             tracks.append(live[-1])
     return [t for t in tracks if len(t) >= min_length]
 
 
 # ------------------------------------------------------------------ run
 
-def detect(kymo, pos, p, frames):
-    """(r, height, score), each (track x kept frame), NaN where not detected."""
-    k = kymo[:, frames]
-    f, i, s = find_peaks(heatmap(normalize(k)), p["unet_threshold"])
-    tracks = link(f, i, s, p["unet_gate"], p["unet_memory"], p["unet_min_length"])
-    r, score = np.full((2, len(tracks), len(frames)), np.nan)
-    for a, t in enumerate(tracks):
-        for fr, x, sc in t:
-            r[a, fr], score[a, fr] = x + pos[0], sc
-    inside = (r >= p["rmin"]) & (r <= p["rmax"])
-    r[~inside] = score[~inside] = np.nan
-    keep = np.isfinite(r).any(axis=1)
-    r, score = r[keep], score[keep]
-
-    # heights above the same baseline the viewer subtracts
-    keep_r = (pos >= p["rmin"]) & (pos <= p["rmax"])
-    base, pos = k[keep_r], pos[keep_r]
-    shared = shared_background(base, pos, p)
-    bg = column_backgrounds(base, pos, p) if shared is None else shared[:, None]
-    flat = np.column_stack([smoothed(base[:, t], p["smooth"]) for t in range(len(frames))]) - bg
+def peak_heights(kymo, pos, r, p):
+    """Height of each (track x frame) position above the baseline the viewer subtracts."""
+    shared = shared_background(kymo, pos, p)
+    bg = column_backgrounds(kymo, pos, p) if shared is None else shared[:, None]
+    flat = np.column_stack([smoothed(col, p["smooth"]) for col in kymo.T]) - bg
     height = np.full(r.shape, np.nan)
-    for t in range(len(frames)):
+    for t in range(r.shape[1]):
         ok = np.isfinite(r[:, t])
         height[ok, t] = np.interp(r[ok, t], pos, flat[:, t])
-    return r, height, score
+    return height
+
+
+def detect(inp, p):
+    """(r, height, score), each (track x kept frame), NaN where not detected."""
+    kymo, pos = inp.kymo[:, inp.frames], inp.pos
+    frame, row, sc = find_peaks(heatmap(normalize(kymo)), p["unet_threshold"])
+    tracks = link(frame, row, sc, p["unet_gate"], p["unet_memory"], p["unet_min_length"])
+    r, score = np.full((2, len(tracks), len(inp.frames)), np.nan)
+    for a, points in enumerate(tracks):
+        for t, x, s in points:
+            r[a, t], score[a, t] = x + pos[0], s
+    inside = (r >= p["rmin"]) & (r <= p["rmax"])
+    r[~inside] = score[~inside] = np.nan
+    found = np.isfinite(r).any(axis=1)
+    r, score = r[found], score[found]
+    keep = (pos >= p["rmin"]) & (pos <= p["rmax"])
+    return r, peak_heights(kymo[keep], pos[keep], r, p), score
+
+
+def write_tracks(path, rows, names, inp):
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["track", "label", "frame", "r", "d_nm", "height", "score"])
+        for row in rows:
+            numbers = (row["r"], inp.d_nm(row["r"]), row["height"], row["score"])
+            w.writerow([row["track"], names[row["track"]], row["frame"]] + [f"{v:.5g}" for v in numbers])
 
 
 def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
-    """Detect and track (or reuse the cached result in out_dir) and label; returns (summary, cached)."""
+    """Detect and track (or reuse the saved result in out_dir) and label; returns (summary, cached)."""
     p = dict(multiscale.DEFAULTS, **DEFAULTS)
     p.update(params or {})
-    kymo = np.load(npy)
-    with open(os.path.splitext(npy)[0] + ".json") as f:
-        meta = json.load(f)
-    inv_nm = meta.get("inv_nm_per_pixel")
-    pos = np.arange(kymo.shape[0]) + meta.get("pos_start", 0)
-    drop = excluded_mask(kymo, p, exclude)
-    frames = np.flatnonzero(~drop)
-    key = dict({k: p[k] for k in KEYS}, detector="unet", model=os.path.basename(MODEL),
-               model_sha256=cache.file_hash(MODEL), kymo=os.path.abspath(npy), kymo_sha256=cache.array_hash(kymo),
-               n_frames_source=int(kymo.shape[1]), inv_nm_per_pixel=inv_nm,
-               dropped_frames=np.flatnonzero(drop).tolist())
+    inp = tracking.load_input(npy, p, exclude)
+    key = dict({k: p[k] for k in KEYS}, **inp.key(), detector="unet", model=os.path.basename(MODEL),
+               model_sha256=cache.file_hash(MODEL))
 
     os.makedirs(out_dir, exist_ok=True)
-    run_json, npz = os.path.join(out_dir, "run.json"), os.path.join(out_dir, "unet.npz")
-    cached = cache.matches(cache.read_json(run_json), key) and os.path.exists(npz)
+    npz = os.path.join(out_dir, "unet.npz")
+    cached = tracking.saved_run(out_dir, key, ("unet.npz",)) is not None
     if cached:
         with np.load(npz) as data:
             r, height, score = data["r"][0], data["height"][0], data["score"]
     else:
-        r, height, score = detect(kymo, pos, p, frames)
+        r, height, score = detect(inp, p)
         # one "scale" (per frame), in the layout the viewer reads
-        np.savez_compressed(npz, scales=[1], frames=frames, r=r[None], height=height[None], score=score)
-        with open(run_json, "w") as f:
-            json.dump(key, f, indent=2)
+        np.savez_compressed(npz, scales=[1], frames=inp.frames, r=r[None], height=height[None], score=score)
+        tracking.save_run(out_dir, key)
 
-    rows = [dict(track=int(a), frame=int(frames[t]), r=float(r[a, t]), height=float(height[a, t]),
+    rows = [dict(track=int(a), frame=int(inp.frames[t]), r=float(r[a, t]), height=float(height[a, t]),
                  score=float(score[a, t])) for a, t in zip(*np.nonzero(np.isfinite(r)))]
     peaks = read_expected_peaks(peaks_csv) if peaks_csv else []
-    labels = (label_tracks(rows, inv_nm, peaks, p["tol_pct"], p["min_frames"], share_names=True)
-              if inv_nm and peaks else {})
+    labels = label_tracks(rows, inp.inv_nm, peaks, p["tol_pct"], p["min_frames"], share_names=True)
     write_labels(out_dir, labels)
     names = {**{a: v[0] for a, v in labels.items()}, **unmatched_names(r, labels)}
-    with open(os.path.join(out_dir, "tracks.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["track", "label", "frame", "r", "d_nm", "height", "score"])
-        for x in rows:
-            d = 1.0 / (x["r"] * inv_nm) if inv_nm and x["r"] > 0 else np.nan
-            w.writerow([x["track"], names[x["track"]], x["frame"]] + [f"{v:.5g}" for v in (x["r"], d, x["height"], x["score"])])
-
-    summary = (f"U-Net ({os.path.basename(MODEL)}): {len(r)} tracks, excluded frames "
-               f"{format_frames(np.flatnonzero(drop)) or 'none'}; labelled {len(labels)}, unmatched {len(r) - len(labels)}: "
-               + ", ".join(sorted({v[0] for v in labels.values()})))
-    if len(frames) < p["unet_min_length"]:
-        summary += (f"\nWARNING: only {len(frames)} frames kept, fewer than the minimum track length "
-                    f"({p['unet_min_length']}): no track can be found. Lower it in Parameters.")
-    return summary, cached
+    write_tracks(os.path.join(out_dir, "tracks.csv"), rows, names, inp)
+    return summarize(inp, p, len(r), labels), cached
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("kymo", help="per-frame kymograph .npy (meridian_w<W>_g1.npy)")
-    ap.add_argument("--out-dir", help="default <kymo dir>/unet_w<W>")
-    ap.add_argument("--params", help="parameters.json (missing keys use the defaults)")
-    ap.add_argument("--peaks", help="expected_peaks.csv for the labels")
-    ap.add_argument("--exclude", help='frames to exclude, from 0, e.g. "0-1, 40-60" (default: blank frames)')
-    args = ap.parse_args()
-    params = {}
-    if args.params:
-        with open(args.params) as f:
-            params = json.load(f)
-    width = os.path.basename(args.kymo).split("_")[1]
-    out = args.out_dir or os.path.join(os.path.dirname(os.path.abspath(args.kymo)), f"unet_{width}")
-    exclude = None if args.exclude is None else parse_frames(args.exclude)
-    print(process(args.kymo, out, params, args.peaks, exclude)[0])
+def summarize(inp, p, n_tracks, labels):
+    text = (f"U-Net ({os.path.basename(MODEL)}): {n_tracks} tracks, "
+            f"excluded frames {format_frames(inp.dropped) or 'none'}; "
+            f"labelled {len(labels)}, unmatched {n_tracks - len(labels)}: "
+            + ", ".join(sorted({v[0] for v in labels.values()})))
+    if len(inp.frames) < p["unet_min_length"]:
+        text += (f"\nWARNING: only {len(inp.frames)} frames kept, fewer than the minimum track length "
+                 f"({p['unet_min_length']}): no track can be found. Lower it in Parameters.")
+    return text
 
 
 if __name__ == "__main__":
-    main()
+    tracking.run_cli(process, "unet", __doc__)

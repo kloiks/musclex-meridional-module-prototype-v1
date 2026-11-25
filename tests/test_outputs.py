@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ import multiscale
 import unet
 from calibrate_m3 import calibrate_file, meridional_profile
 from frames import blank_frames
+from recording import Job
 
 STRUCTURE = os.environ.get("KYMO_TEST_DATA", "/home/irina/data/2026_09_22_Hessel/EDL_Lo/Passive/structure")
 RECORDINGS = ("WT4_RigA_LoPassive2_0071", "WT4_RigA_LoPassive1_0070")
@@ -83,7 +85,7 @@ def run_pipeline(rec, out):
     cal = calibrate_file(kymograph.find_frames(qf)[0], W, PARAMS["m3_rmin"],
                          os.path.join(out, "calibration.json"), None, PARAMS["d_m3"])
     cached = {}
-    npy, cached["kymograph"] = kymograph.make_kymograph(qf, out, W, 1, cal["inv_nm_per_pixel"])
+    npy, cached["kymograph"] = kymograph.make_kymograph(qf, out, W, cal["inv_nm_per_pixel"])
     ddf = sorted(glob.glob(os.path.join(folder, "*.ddf")))[0]
     summary = kymo_force.kymo_force(npy, ddf, (PARAMS["pos_lo"], PARAMS["pos_hi"]), PARAMS["stretch"])
     cached["force"] = summary.endswith("(cached)")
@@ -179,7 +181,8 @@ class TestRecordings(unittest.TestCase):
         """Both detectors offer groupings 1, 2, 4, 8, 16, and each one is shown."""
         if len(self.out) < len(RECORDINGS):
             self.skipTest(f"no data in {STRUCTURE}")
-        from viewer import GROUPS, Viewer
+        from recording import GROUPS
+        from viewer import Viewer
         qt_app()
         for detector in ("multiscale", "unet"):
             view = Viewer()
@@ -193,15 +196,14 @@ class TestRecordings(unittest.TestCase):
                 with self.subTest(detector=detector, grouping=s):
                     view.scale_box.setCurrentText(str(s))
                     for r in view.recs:
-                        ms = r["ms"]
-                        self.assertEqual(r["s"], s)
-                        np.testing.assert_allclose(ms["grouped"][s], multiscale.bin_time(ms["base"], s))
-                        self.assertEqual(ms["scales"][r["k"]], s if detector == "multiscale" else 1)
+                        self.assertEqual(r.s, s)
+                        np.testing.assert_allclose(r.view.grouped, multiscale.bin_time(r.base, s))
+                        self.assertEqual(r.scales[r.k], s if detector == "multiscale" else 1)
             view.close()
 
 
 class TestKymographCache(unittest.TestCase):
-    """Synthetic frames: what is rebuilt when the images, the calibration or the grouping change."""
+    """Synthetic frames: what is rebuilt when the images or the calibration change."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -244,15 +246,6 @@ class TestKymographCache(unittest.TestCase):
         again, cached = self.make()
         self.assertFalse(cached)
         np.testing.assert_array_equal(good, again)
-
-    def test_grouped_files(self):
-        one, _ = self.make()
-        for g in (2, 4, 8, 16):
-            grouped, _ = self.make(group=g)
-            self.assertEqual(grouped.shape[1], 32 // g)
-            np.testing.assert_array_equal(grouped[:, 0], one[:, :g].sum(axis=1))
-        self.write(0, 500)
-        self.assertEqual(self.make(group=2)[0][0, 0], 20 * (500 + 2))  # not the old grouped file
 
 
 class TestUnetCache(unittest.TestCase):
@@ -300,10 +293,158 @@ class TestStripAndBlankFrames(unittest.TestCase):
         for dark, fraction in ((slice(8, 12), 0.05), (slice(0, 14), 0.05), (slice(8, 12), 0.5)):
             kymo = np.full((10, 20), 100.0)
             kymo[:, dark] = 0.1 if fraction == 0.05 else 30.0
-            spans = kymo_force.dark_spans(kymo, 0.0, 1.0, fraction)
+            spans = kymo_force.dark_spans(kymo, 1.0, fraction)
             self.assertEqual(spans, [(dark.start, dark.stop)])
             blank = blank_frames(kymo.sum(axis=0), fraction, 0)
             self.assertEqual(np.flatnonzero(blank).tolist(), list(range(dark.start, dark.stop)))
+
+
+class TestTrackingCache(unittest.TestCase):
+    """Multiscale on a synthetic kymograph, and the command lines."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.npy = os.path.join(self.tmp, "meridian_w20_g1.npy")
+        r = np.arange(300)[:, None]
+        rng = np.random.default_rng(0)
+        np.save(self.npy, rng.poisson(300.0 - r * 0.5 + 400 * np.exp(-0.5 * ((r - 150) / 2.0) ** 2) * np.ones(30))
+                .astype(float))
+        with open(self.npy[:-4] + ".json", "w") as f:
+            json.dump(dict(pos_start=0, inv_nm_per_pixel=1e-3, source=self.tmp), f)
+
+    def process(self, exclude=None, **changes):
+        return multiscale.process(self.npy, os.path.join(self.tmp, "ms"), dict(PARAMS, **changes), PEAKS, exclude)[1]
+
+    def test_settings(self):
+        self.assertFalse(self.process())
+        self.assertTrue(self.process())
+        self.assertTrue(self.process(tol_pct=2.0))
+        self.assertFalse(self.process(snr_fine=1.5))
+        self.assertFalse(self.process(snr_fine=1.5, exclude=[3]))
+
+    def test_runs_of_older_versions_are_not_reused(self):
+        self.process()
+        path = os.path.join(self.tmp, "ms", "run.json")
+        with open(path) as f:
+            run = json.load(f)
+        del run["version"]  # as saved when there were corridor options
+        with open(path, "w") as f:
+            json.dump(dict(run, ref="parent", select="snr"), f)
+        self.assertFalse(self.process())
+
+    def test_command_lines(self):
+        root = os.path.dirname(HERE)
+        qf = os.path.join(self.tmp, "rec", "qf_results")
+        os.makedirs(qf)
+        tif = os.path.join(qf, "f_1.tif")
+        r = np.abs(np.arange(401) - 200)[:, None]
+        Image.fromarray((500.0 - r + 90 * np.exp(-0.5 * ((r - 150) / 2.0) ** 2) * np.ones(401))
+                        .astype(np.float32)).save(tif)
+        cal = os.path.join(self.tmp, "cal.json")
+        for args in (["calibrate_m3.py", tif, "--rmin", "100", "-o", cal, "--debug"],
+                     ["kymograph.py", qf, "--calibration", cal],
+                     ["multiscale.py", self.npy, "--peaks", PEAKS, "--exclude", "0-1"]):
+            run = subprocess.run([sys.executable, os.path.join(root, args[0])] + args[1:],
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+        with open(os.path.join(qf, "kymo", "meridian_w20_g1.json")) as f:
+            self.assertAlmostEqual(json.load(f)["inv_nm_per_pixel"], 1 / (150 * 14.34))
+        with open(os.path.join(self.tmp, "multiscale_w20", "run.json")) as f:
+            self.assertEqual(json.load(f)["dropped_frames"], [0, 1])
+
+    def test_unet_and_force_command_lines(self):
+        rec = RECORDINGS[0]
+        if not have_data(rec):
+            self.skipTest(f"no data in {STRUCTURE}")
+        ddf = glob.glob(os.path.join(STRUCTURE, rec, "*.ddf"))[0]
+        for args in (["kymo_force.py", self.npy, ddf, "--pos-range", "0", "200"],
+                     ["unet.py", self.npy, "--peaks", PEAKS]):
+            run = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), args[0])] + args[1:],
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue(os.path.exists(self.npy[:-4] + "_force.png"))
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "unet_w20", "tracks.csv")))
+
+
+class TestRecording(unittest.TestCase):
+    def test_scale_for(self):
+        from recording import Recording
+        n = 40
+        rec = Recording(label="", color="", traces=[], dt=0.005, inv=1e-3, detector="multiscale",
+                        params=multiscale.DEFAULTS, n_source=50, frames=np.arange(5, 45), pos=np.arange(20),
+                        base=np.ones((20, n)), scales=np.array([40, 27, 9, 3, 1]), r=np.empty((5, 0, n)),
+                        height=np.empty((5, 0, n)), labels={}, unmatched={})
+        self.assertEqual(rec.scale_for(1), (1, 4))
+        self.assertEqual(rec.scale_for(8), (8, 2))    # a group on offer: kept, tracks of scale 9
+        self.assertEqual(rec.scale_for(27), (27, 1))
+        self.assertEqual(rec.scale_for(59), (40, 0))  # a longer recording's whole record
+        self.assertEqual(rec.column_at(0.026), 0)
+        self.assertIsNone(rec.column_at(0.01))
+
+
+class TestOtherDialogs(unittest.TestCase):
+    """Opening and saving against a temporary config folder changes nothing."""
+
+    def setUp(self):
+        import dialogs
+        import params
+        qt_app()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        for name in ("expected_peaks.csv", "parameters.json"):
+            shutil.copy(os.path.join(REFERENCE, "config", name), self.tmp)
+        for module, name, value in ((params, "PARAMS_JSON", "parameters.json"), (params, "CONFIG", ""),
+                                    (dialogs, "PEAKS_CSV", "expected_peaks.csv")):
+            patch = unittest.mock.patch.object(module, name, os.path.join(self.tmp, value))
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def read(self, name):
+        with open(os.path.join(self.tmp, name)) as f:
+            return f.read()
+
+    def test_save_unchanged(self):
+        from dialogs import BackgroundDialog, ExpectedPeaksDialog, ParametersDialog
+        before = self.read("expected_peaks.csv"), json.loads(self.read("parameters.json"))
+        for kind in (BackgroundDialog, ExpectedPeaksDialog, ParametersDialog):
+            d = kind(None)
+            self.addCleanup(delete_widget, d)
+            d.save()
+        from params import DEFAULTS
+        self.assertEqual(before[0], self.read("expected_peaks.csv"))
+        self.assertEqual({k: v for k, v in before[1].items() if k in DEFAULTS},
+                         json.loads(self.read("parameters.json")))
+
+    def test_background_choice(self):
+        from dialogs import BackgroundDialog
+        d = BackgroundDialog(None)
+        self.addCleanup(delete_widget, d)
+        d.methods["fit"].setChecked(True)
+        d.choices["averaged"].setChecked(True)
+        d.comp2.setCurrentIndex(2)
+        d.save()
+        p = json.loads(self.read("parameters.json"))
+        self.assertEqual((p["bg_method"], p["background"], p["bg_comp2"]), ("fit", "averaged", "stretched"))
+
+    def test_excluded_frames(self):
+        from dialogs import ParametersDialog
+        from frames import load_excluded
+        qf, out = os.path.join(self.tmp, "rec", "qf_results"), os.path.join(self.tmp, "out")
+        os.makedirs(qf)
+        for i in range(10):
+            Image.fromarray(np.full((60, 60), 0.0 if i == 4 else 9.0, np.float32)).save(os.path.join(qf, f"f_{i}.tif"))
+        d = ParametersDialog(None, [Job(qf, "", out)])
+        self.addCleanup(delete_widget, d)
+        r = d.recs[0]
+        self.assertEqual((r["edit"].text(), r["auto"]), ("3-5", True))
+        r["edit"].setText("1, 7-8")
+        r["edit"].textEdited.emit("1, 7-8")
+        d.save()
+        self.assertEqual(load_excluded(out), [1, 7, 8])
+        d.set_auto(r, True)
+        d.save()
+        self.assertIsNone(load_excluded(out))
 
 
 class TestScaleRatio(unittest.TestCase):
@@ -338,8 +479,8 @@ class TestCalibrationDialog(unittest.TestCase):
             profile = 200.0 - r + 50 * np.exp(-0.5 * ((r - peak) / 2.0) ** 2)
             Image.fromarray(np.repeat(profile[:, None], 201, axis=1).astype(np.float32)).save(
                 os.path.join(qf, f"f_{i}.tif"))
-        self.job = (qf, None, os.path.join(self.tmp, "out"))
-        self.path = os.path.join(self.job[2], "calibration.json")
+        self.job = Job(qf, "", os.path.join(self.tmp, "out"))
+        self.path = os.path.join(self.job.out, "calibration.json")
 
     def dialog(self, frame=1):
         from dialogs import CalibrationDialog

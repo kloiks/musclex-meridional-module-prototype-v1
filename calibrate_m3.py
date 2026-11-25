@@ -15,7 +15,9 @@ import os
 
 import numpy as np
 from PIL import Image
+from matplotlib.figure import Figure
 
+import cache
 from background import convex_hull_subtract
 
 D_M3_NM = 14.34  # 42.9 / 3
@@ -47,8 +49,6 @@ def from_m3(n_m3, d_m3=D_M3_NM):
 
 
 def save_projection_png(radii, folded, n_m3, rmin, path):
-    from matplotlib.figure import Figure
-
     fig = Figure(figsize=(10, 4))
     ax = fig.subplots()
     ax.plot(radii, folded, lw=1.0, color="black", label="meridional projection (hull subtracted)")
@@ -70,6 +70,19 @@ def calibrate_file(image, gap, rmin, out_json, debug_png=None, d_m3=D_M3_NM):
     if debug_png:
         save_projection_png(radii, folded, data["n_m3_pixels"], rmin, debug_png)
     return data
+
+
+def load_or_calibrate(image, out_dir, width, rmin, d_m3):
+    """(calibration, cached): reuse <out_dir>/calibration.json if made from the same image and width
+    (and, unless M3 was set by hand in the Calibration window, the same rmin and d_M3)."""
+    path, image = os.path.join(out_dir, "calibration.json"), os.path.abspath(image)
+    cal = cache.read_json(path)
+    if "n_m3_pixels" in cal and cache.matches(cal, dict(image=image, gap_pixels=width)):
+        if cal.get("manual"):
+            return dict(cal, **from_m3(cal["n_m3_pixels"], d_m3)), True
+        if cache.matches(cal, dict(rmin_pixels=rmin, d_m3_nm=d_m3)):
+            return cal, True
+    return calibrate_file(image, width, rmin, path, os.path.join(out_dir, "calibration_projection.png"), d_m3), False
 
 
 def main():

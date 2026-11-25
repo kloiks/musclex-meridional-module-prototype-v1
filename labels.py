@@ -27,6 +27,8 @@ def label_windows(peaks, tol_pct):
 def label_tracks(rows, inv_nm, peaks, tol_pct, min_frames, share_names=False):
     """{track: (name, d_nm, d - d0)}, closest pair first.  Each name is given once or, with
     ``share_names`` (U-Net), also to further tracks that have no frame in common with its others."""
+    if not inv_nm or not peaks:
+        return {}
     r_of, frames_of = {}, {}
     for row in rows:
         r_of.setdefault(row["track"], []).append(row["r"])

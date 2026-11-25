@@ -1,9 +1,7 @@
 {
   "source": "/home/irina/data/2026_09_22_Hessel/EDL_Lo/Passive/structure/WT4_RigA_LoPassive1_0070/qf_results",
   "width": 20,
-  "group": 1,
   "n_source_frames": 80,
-  "n_frames": 80,
   "pos_start": 0,
   "first_frame": "WT4_RigA_LoPassive1_0070_master_00001_folded_compressed.tif",
   "last_frame": "WT4_RigA_LoPassive1_0070_master_00080_folded_compressed.tif",

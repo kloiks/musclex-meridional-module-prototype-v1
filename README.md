@@ -22,7 +22,7 @@ Per folder it writes:
 | file | from |
 |---|---|
 | `calibration.json`, `calibration_projection.png` | M3 calibration on the first frame (strip width = kymograph width) |
-| `meridian_w<W>_g1.npy/.json`, `_log.png` | kymograph, positive half, one column per frame (`kymograph.py --group N` sums N frames per column) |
+| `meridian_w<W>_g1.npy/.json`, `_log.png` | kymograph, positive half, one column per frame |
 | `meridian_w<W>_g1_force.png/.json`, `_events.csv`, `_traces.csv` | only with a `.ddf`; column 0 aligned to the first non-zero Trigger |
 | `multiscale_w<W>/` `tracks.csv`, `labels.csv`, `multiscale.npz`, `run.json` | multiscale tracking on the per-frame kymograph, beam-off frames dropped; anchors named after the expected peaks |
 | `unet_w<W>/` `tracks.csv`, `labels.csv`, `unet.npz`, `run.json` | U-Net detection (tracks of one reflection that share no frame may share a name) |
@@ -31,10 +31,10 @@ The scripts also run on their own:
 
 ```sh
 python calibrate_m3.py frame_00001_folded_compressed.tif --gap 20 --rmin 250 --debug
-python kymograph.py qf_results --width 20 --group 2 --calibration cal.json
+python kymograph.py qf_results --width 20 --calibration cal.json
 python multiscale.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
 python unet.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --exclude "0-1, 40-60"
-python kymo_force.py qf_results/kymo/meridian_w20_g2.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
+python kymo_force.py qf_results/kymo/meridian_w20_g1.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
 ```
 
 Tests (two recordings against `tests/reference/`; the U-Net files are compared only on a GPU):
@@ -43,3 +43,15 @@ Tests (two recordings against `tests/reference/`; the U-Net files are compared o
 python -m unittest discover tests -v
 python tests/test_outputs.py --update   # accept the current outputs as the new reference
 ```
+
+Code:
+
+| file | job |
+|---|---|
+| `kymo_gui.py` | main window and the worker thread |
+| `dialogs.py`, `viewer.py` | the dialogs; the viewer, with its `controls.py`, `plots.py` and data (`recording.py`) |
+| `params.py` | parameters and config paths |
+| `calibrate_m3.py`, `kymograph.py` | M3 calibration; images to kymograph |
+| `ddf.py`, `kymo_force.py` | reading the `.ddf`; force figure and CSVs |
+| `multiscale.py`, `unet.py` | the two trackers; `tracking.py` is what they share |
+| `background.py`, `labels.py`, `frames.py`, `cache.py` | backgrounds and noise; naming tracks; excluded frames; data hashes |

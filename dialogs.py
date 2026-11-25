@@ -1,4 +1,4 @@
-"""Parameters (config/parameters.json) and the dialogs that edit them, the expected peaks and the calibration."""
+"""The dialogs: expected peaks, parameters, background and calibration."""
 import csv
 import json
 import os
@@ -12,18 +12,13 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
                                QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
-import multiscale
-import unet
-from calibrate_m3 import D_M3_NM, calibrate, from_m3
+import cache
+from calibrate_m3 import calibrate, from_m3
+from controls import canvas
 from frames import blank_frames, format_frames, load_excluded, parse_frames, save_excluded
-from kymograph import cached_frames_kymograph, find_frames
-from viewer import canvas
+from kymograph import cached_kymograph, find_frames
+from params import DEFAULTS, PEAKS_CSV, load_params, save_params
 
-CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
-PARAMS_JSON = os.path.join(CONFIG, "parameters.json")
-PEAKS_CSV = os.path.join(CONFIG, "expected_peaks.csv")
-
-DEFAULTS = dict(multiscale.DEFAULTS, **unet.DEFAULTS, width=20, m3_rmin=250, d_m3=D_M3_NM, pos_lo=0, pos_hi=1200, stretch=1.4)
 # (group, [(key, label, choices or None)]); the widget type follows the default's type
 PARAM_GROUPS = [
     ("Kymograph", [("width", "Meridional strip width (px)", None),
@@ -50,32 +45,44 @@ PARAM_GROUPS = [
                              ("corridor", "Corridor half-width (px)", None),
                              ("base", "Scale ratio", None),
                              ("min_cov", "Coverage that counts as resolved", None),
-                             ("select", "Peak kept per frame", ("nearest", "snr")),
-                             ("ref", "Corridor reference", ("coarse", "parent")),
-                             ("seed_anchors", "Seed anchors at expected peaks (needs coarse)", ("yes", "no"))]),
+                             ("seed_anchors", "Seed anchors at expected peaks", ("yes", "no"))]),
     ("Labelling", [("tol_pct", "Default tolerance (% of d)", None),
                    ("min_frames", "Min frames of a labelled track", None)]),
 ]
 MINIMUMS = {"base": 2}  # the other numbers start at 0
 
 
-def save_params(values):
-    """Update config/parameters.json with ``values``, keeping the other keys."""
-    params = load_params()
-    params.update(values)
-    os.makedirs(CONFIG, exist_ok=True)
-    with open(PARAMS_JSON, "w") as f:
-        json.dump(params, f, indent=2)
+def note(text):
+    label = QLabel(text)
+    label.setStyleSheet("color: grey")
+    return label
 
 
-def load_params():
-    params = dict(DEFAULTS)
-    try:
-        with open(PARAMS_JSON) as f:
-            params.update({k: v for k, v in json.load(f).items() if k in DEFAULTS})
-    except (OSError, ValueError):
-        pass
-    return params
+def save_cancel(dialog, *more):
+    """The Save and Cancel (and ``more``) buttons of a dialog."""
+    flags = QDialogButtonBox.Save | QDialogButtonBox.Cancel
+    for button in more:
+        flags |= button
+    buttons = QDialogButtonBox(flags)
+    buttons.accepted.connect(dialog.save)
+    buttons.rejected.connect(dialog.reject)
+    return buttons
+
+
+def radio_group(title, choices, current):
+    """(box, {key: radio button}) of (key, text) choices; an unknown ``current`` selects the first."""
+    box = QGroupBox(title)
+    layout = QVBoxLayout(box)
+    buttons = {}
+    for key, text in choices:
+        buttons[key] = QRadioButton(text)
+        layout.addWidget(buttons[key])
+    buttons.get(current, buttons[choices[0][0]]).setChecked(True)
+    return box, buttons
+
+
+def checked(buttons):
+    return next(key for key, b in buttons.items() if b.isChecked())
 
 
 class ExpectedPeaksDialog(QDialog):
@@ -100,11 +107,7 @@ class ExpectedPeaksDialog(QDialog):
 
         add, remove = QPushButton("Add peak"), QPushButton("Remove selected")
         add.clicked.connect(self.add_row)
-        remove.clicked.connect(lambda: [self.table.removeRow(i) for i in
-                                        sorted({ix.row() for ix in self.table.selectedIndexes()}, reverse=True)])
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
+        remove.clicked.connect(self.remove_selected)
         edit_row = QHBoxLayout()
         edit_row.addWidget(add)
         edit_row.addWidget(remove)
@@ -115,7 +118,7 @@ class ExpectedPeaksDialog(QDialog):
                                 "Windows are capped at half the gap to the neighbouring peak."))
         layout.addWidget(self.table)
         layout.addLayout(edit_row)
-        layout.addWidget(buttons)
+        layout.addWidget(save_cancel(self))
         self.resize(480, 640)
 
     def set_tol(self, i, text):
@@ -140,19 +143,30 @@ class ExpectedPeaksDialog(QDialog):
         self.table.scrollToBottom()
         self.table.editItem(self.table.item(i, 0))
 
+    def remove_selected(self):
+        for i in sorted({ix.row() for ix in self.table.selectedIndexes()}, reverse=True):
+            self.table.removeRow(i)
+
+    def cell(self, i, j):
+        item = self.table.item(i, j)
+        return item.text().strip() if item else ""
+
+    def read_row(self, i):
+        """(name, d, tolerance or None) of a row, None if it is empty; ValueError if it is incomplete."""
+        name, d, tol = (self.cell(i, j) for j in range(3))
+        if not name and not d:
+            return None
+        if not name:
+            raise ValueError("no name")
+        if self.table.item(i, 2).data(Qt.UserRole) and tol == self.default_tol:
+            tol = ""  # still the default: keep following the parameter
+        return name, float(d), float(tol) if tol else None
+
     def save(self):
         rows = []
         for i in range(self.table.rowCount()):
-            name, d, tol = (self.table.item(i, j).text().strip() if self.table.item(i, j) else ""
-                            for j in range(3))
-            if not name and not d:
-                continue
-            if self.table.item(i, 2).data(Qt.UserRole) and tol == self.default_tol:
-                tol = ""  # still the default: keep following the parameter
             try:
-                rows.append((name, float(d), float(tol) if tol else None))
-                if not name:
-                    raise ValueError
+                rows.append(self.read_row(i))
             except ValueError:
                 QMessageBox.warning(self, "Expected peaks", f"Row {i + 1}: needs a name, a number for d "
                                                             "and an empty or numeric tolerance.")
@@ -160,7 +174,7 @@ class ExpectedPeaksDialog(QDialog):
         with open(PEAKS_CSV, "w") as f:
             f.writelines(self.header)
             f.write("name,d_nm,tol_pct\n")
-            for name, d, tol in sorted(rows, key=lambda r: -r[1]):
+            for name, d, tol in sorted((r for r in rows if r), key=lambda r: -r[1]):
                 f.write(f"{name},{d:g},{'' if tol is None else f'{tol:g}'}\n")
         self.accept()
 
@@ -173,34 +187,25 @@ class ParametersDialog(QDialog):
     def __init__(self, parent, jobs=()):
         super().__init__(parent)
         self.setWindowTitle("Parameters")
-        self.widgets = {}
+        self.widgets = {}  # parameter -> its widget
+        self.recs = []     # per recording; r["auto"] = the list follows the detection
         content = QWidget()
         columns = QHBoxLayout(content)
         sides = [QVBoxLayout(), QVBoxLayout()]
         for side in sides:
             columns.addLayout(side)
-        scroll = QScrollArea(widgetResizable=True)
-        scroll.setWidget(content)
-        layout = QVBoxLayout(self)
-        layout.addWidget(scroll)
         sides[0].addWidget(self.exclude_box(jobs, load_params()["width"]))
         for title, items in PARAM_GROUPS:
-            box = QGroupBox(title)
-            form = QFormLayout(box)
-            for key, label, choices in items:
-                w = self.widget(DEFAULTS[key], choices)
-                if key in MINIMUMS:
-                    w.setMinimum(MINIMUMS[key])
-                self.widgets[key] = w
-                form.addRow(label, w)
-            sides[title.startswith(("Multiscale", "Labelling"))].addWidget(box)
+            sides[title.startswith(("Multiscale", "Labelling"))].addWidget(self.param_box(title, items))
         for side in sides:
             side.addStretch()
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel
-                                   | QDialogButtonBox.RestoreDefaults)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
+
+        scroll = QScrollArea(widgetResizable=True)
+        scroll.setWidget(content)
+        buttons = save_cancel(self, QDialogButtonBox.RestoreDefaults)
         buttons.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self.restore_defaults)
+        layout = QVBoxLayout(self)
+        layout.addWidget(scroll)
         layout.addWidget(buttons)
         self.set_values(load_params())
         self.fill_auto()
@@ -212,41 +217,49 @@ class ParametersDialog(QDialog):
         size = columns.sizeHint()
         self.resize(size.width() + 60, min(size.height() + 100, 900))
 
+    def param_box(self, title, items):
+        box = QGroupBox(title)
+        form = QFormLayout(box)
+        for key, label, choices in items:
+            self.widgets[key] = self.widget(key, choices)
+            form.addRow(label, self.widgets[key])
+        return box
+
     def exclude_box(self, jobs, width):
-        """One "frames to exclude" field per recording; r["auto"] = it follows the detection."""
+        """One "frames to exclude" field per recording."""
         box = QGroupBox("Frames to exclude (multiscale and U-Net)")
         form = QFormLayout(box)
-        self.recs = []
         QApplication.setOverrideCursor(Qt.WaitCursor)  # without a cached kymograph the images are read
         try:
-            for qf, _, out in jobs:
-                label = os.path.basename(os.path.dirname(os.path.abspath(qf)))
+            for job in jobs:
                 try:
-                    kymo = cached_frames_kymograph(find_frames(qf), out, width)[0]
-                    saved = load_excluded(out)
+                    kymo = cached_kymograph(find_frames(job.qf), job.out, width)[0]
+                    saved = load_excluded(job.out)
                 except Exception as e:
-                    form.addRow(label, QLabel(f"cannot read: {e}"))
-                    continue
-                r = dict(out=out, label=label, totals=kymo.sum(axis=0), auto=saved is None,
-                         edit=QLineEdit("" if saved is None else format_frames(saved)), info=QLabel())
-                r["edit"].setPlaceholderText("none")
-                r["edit"].setMinimumWidth(180)
-                r["edit"].textEdited.connect(lambda _="", r=r: self.set_auto(r, False))
-                auto = QPushButton("Auto")
-                auto.setToolTip("Use the blank frames found in this recording")
-                auto.clicked.connect(lambda _=False, r=r: self.set_auto(r, True))
-                row = QHBoxLayout()
-                for w in (r["edit"], auto, r["info"]):
-                    row.addWidget(w)
-                form.addRow(label, row)
-                self.recs.append(r)
+                    form.addRow(job.label, QLabel(f"cannot read: {e}"))
+                else:
+                    form.addRow(job.label, self.exclude_row(job, kymo.sum(axis=0), saved))
         finally:
             QApplication.restoreOverrideCursor()
-        note = QLabel("Frames from 0, e.g. 0-1, 40-60. Filled in with the blank frames found."
-                      if jobs else "Select a QF folder first.")
-        note.setStyleSheet("color: grey")
-        form.addRow(note)
+        form.addRow(note("Frames from 0, e.g. 0-1, 40-60. Filled in with the blank frames found."
+                         if jobs else "Select a QF folder first."))
         return box
+
+    def exclude_row(self, job, totals, saved):
+        """The field, filled with the ``saved`` frames (None = automatic), and its Auto button."""
+        r = dict(out=job.out, label=job.label, totals=totals, auto=saved is None,
+                 edit=QLineEdit(format_frames(saved or [])), info=QLabel())
+        self.recs.append(r)
+        r["edit"].setPlaceholderText("none")
+        r["edit"].setMinimumWidth(180)
+        r["edit"].textEdited.connect(lambda _: self.set_auto(r, False))
+        auto = QPushButton("Auto")
+        auto.setToolTip("Use the blank frames found in this recording")
+        auto.clicked.connect(lambda: self.set_auto(r, True))
+        row = QHBoxLayout()
+        for w in (r["edit"], auto, r["info"]):
+            row.addWidget(w)
+        return row
 
     def set_auto(self, r, auto):
         r["auto"] = auto
@@ -266,12 +279,12 @@ class ParametersDialog(QDialog):
             self.set_auto(r, True)
 
     @staticmethod
-    def widget(default, choices):
+    def widget(key, choices):
         if choices:
             w = QComboBox()
             w.addItems(choices)
-        elif isinstance(default, int):
-            w = QSpinBox(minimum=0, maximum=100000)
+        elif isinstance(DEFAULTS[key], int):
+            w = QSpinBox(minimum=MINIMUMS.get(key, 0), maximum=100000)
         else:
             w = QDoubleSpinBox(minimum=0.0, maximum=1e6, decimals=3, singleStep=0.1)
         return w
@@ -283,20 +296,26 @@ class ParametersDialog(QDialog):
             else:
                 w.setValue(values[key])
 
+    @staticmethod
+    def excluded(r):
+        """The frames typed for a recording, None if automatic; ValueError if they cannot be used."""
+        if r["auto"]:
+            return None
+        frames, n = parse_frames(r["edit"].text()), len(r["totals"])
+        if frames and frames[-1] >= n:
+            raise ValueError(f"frame {frames[-1]} is past the last frame ({n - 1})")
+        if len(frames) == n:
+            raise ValueError("every frame is excluded")
+        return frames
+
     def save(self):
         lists = []
         for r in self.recs:
             try:
-                frames = None if r["auto"] else parse_frames(r["edit"].text())
-                n = len(r["totals"])
-                if frames and frames[-1] >= n:
-                    raise ValueError(f"frame {frames[-1]} is past the last frame ({n - 1})")
-                if frames is not None and len(frames) == n:
-                    raise ValueError("every frame is excluded")
+                lists.append((r["out"], self.excluded(r)))
             except ValueError as e:
                 QMessageBox.warning(self, "Frames to exclude", f"{r['label']}: {e}")
                 return
-            lists.append((r["out"], frames))
         for out, frames in lists:
             save_excluded(out, frames)
         save_params({key: w.currentText() if isinstance(w, QComboBox) else w.value()
@@ -321,45 +340,33 @@ class BackgroundDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Background subtraction")
         params = load_params()
-        method_box = QGroupBox("Background")
-        method_layout = QVBoxLayout(method_box)
-        self.methods = {}
-        for key, text in self.METHODS:
-            self.methods[key] = QRadioButton(text)
-            method_layout.addWidget(self.methods[key])
-        self.methods.get(params["bg_method"], self.methods["hull"]).setChecked(True)
-        self.fit_box = QGroupBox("Fit")
-        fit_form = QFormLayout(self.fit_box)
+        method_box, self.methods = radio_group("Background", self.METHODS, params["bg_method"])
+        choice_box, self.choices = radio_group("Computed from", self.CHOICES, params["background"])
+        fit_box = self.fit_box(params)
+        method_box.layout().addWidget(fit_box)
+        self.methods["fit"].toggled.connect(fit_box.setEnabled)
+        fit_box.setEnabled(self.methods["fit"].isChecked())
+        layout = QVBoxLayout(self)
+        for w in (method_box, choice_box,
+                  note("Applies on the next run (tracking is recomputed; the kymographs are reused)."),
+                  save_cancel(self)):
+            layout.addWidget(w)
+
+    def fit_box(self, params):
         self.comp2 = QComboBox()
         for key, text in self.COMP2:
             self.comp2.addItem(text, key)
         self.comp2.setCurrentIndex(max(self.comp2.findData(params["bg_comp2"]), 0))
         self.neg_weight = QDoubleSpinBox(minimum=1.0, maximum=1000.0, decimals=1, singleStep=1.0)
         self.neg_weight.setValue(params["bg_neg_weight"])
-        fit_form.addRow("Component 2", self.comp2)
-        fit_form.addRow("Oversubtraction penalty (× weight)", self.neg_weight)
-        method_layout.addWidget(self.fit_box)
-        self.methods["fit"].toggled.connect(self.fit_box.setEnabled)
-        self.fit_box.setEnabled(self.methods["fit"].isChecked())
-        box = QGroupBox("Computed from")
-        form = QVBoxLayout(box)
-        self.buttons = {}
-        for key, text in self.CHOICES:
-            self.buttons[key] = QRadioButton(text)
-            form.addWidget(self.buttons[key])
-        self.buttons.get(params["background"], self.buttons["grouped"]).setChecked(True)
-        note = QLabel("Applies on the next run (tracking is recomputed; the kymographs are reused).")
-        note.setStyleSheet("color: grey")
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
-        layout = QVBoxLayout(self)
-        for w in (method_box, box, note, buttons):
-            layout.addWidget(w)
+        box = QGroupBox("Fit")
+        form = QFormLayout(box)
+        form.addRow("Component 2", self.comp2)
+        form.addRow("Oversubtraction penalty (× weight)", self.neg_weight)
+        return box
 
     def save(self):
-        save_params({"background": next(k for k, b in self.buttons.items() if b.isChecked()),
-                     "bg_method": next(k for k, b in self.methods.items() if b.isChecked()),
+        save_params({"background": checked(self.choices), "bg_method": checked(self.methods),
                      "bg_comp2": self.comp2.currentData(), "bg_neg_weight": self.neg_weight.value()})
         self.accept()
 
@@ -377,20 +384,9 @@ class CalibrationDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Pixel to nm calibration (M3)")
         self.width, self.rmin, self.d_m3 = width, rmin, d_m3
-        self.recs = []
-        for qf, _, out in jobs:
-            frames = find_frames(qf)
-            path = os.path.join(out, "calibration.json")
-            try:
-                with open(path) as f:
-                    cal = json.load(f)
-            except (OSError, ValueError):
-                cal = None
-            self.recs.append(dict(label=os.path.basename(os.path.dirname(os.path.abspath(qf))),
-                                  frames=frames, path=path, cal=cal))
-        n = min(len(r["frames"]) for r in self.recs)
-        self.frame_box = QSpinBox(minimum=1, maximum=n, value=1)
-        self.frame_box.valueChanged.connect(self.draw)
+        self.recs = [self.read_job(job) for job in jobs]
+        self.frame_box = QSpinBox(minimum=1, maximum=min(len(r["frames"]) for r in self.recs), value=1)
+        self.frame_box.valueChanged.connect(lambda _: self.draw())
         self.canvas = canvas(260 * len(self.recs))
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.canvas.mpl_connect("button_press_event", self.click)
@@ -398,42 +394,48 @@ class CalibrationDialog(QDialog):
         form = QGridLayout()
         form.addWidget(QLabel("Frame"), 0, 0)
         form.addWidget(self.frame_box, 0, 1)
-        for i, r in enumerate(self.recs):
-            r["box"] = QDoubleSpinBox(minimum=1.0, maximum=1e5, decimals=1, suffix=" px")
-            r["info"] = QLabel()
-            auto = QPushButton("Auto")
-            auto.clicked.connect(lambda _=False, r=r: self.set_auto(r))
-            form.addWidget(QLabel(r["label"]), i + 1, 0)
-            form.addWidget(r["box"], i + 1, 1)
-            form.addWidget(auto, i + 1, 2)
-            form.addWidget(r["info"], i + 1, 3)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
+        for i, r in enumerate(self.recs, 1):
+            self.add_row(form, i, r)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(f"M3 = {d_m3:g} nm; strip width {width} px, auto search from rmin {rmin} px. "
                                 "Click a plot to place M3."))
         layout.addLayout(form)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
-        layout.addWidget(buttons)
+        for w in (self.toolbar, self.canvas, save_cancel(self)):
+            layout.addWidget(w)
         self.resize(1000, 300 + 260 * len(self.recs))
-        self.draw(init=True)
+        self.draw()
 
-    def draw(self, *_, init=False):
+    def read_job(self, job):
+        """A recording: r["n_m3"] and r["manual"] as saved for this width (None = not saved);
+        r["frame"] = the frame the radius was set on in this window (None = not set here)."""
+        path = os.path.join(job.out, "calibration.json")
+        cal = cache.read_json(path)
+        saved = cal.get("gap_pixels") == self.width
+        return dict(label=job.label, frames=find_frames(job.qf), path=path, frame=None,
+                    n_m3=float(cal["n_m3_pixels"]) if saved else None, manual=bool(saved and cal.get("manual")))
+
+    def add_row(self, form, i, r):
+        r["box"] = QDoubleSpinBox(minimum=1.0, maximum=1e5, decimals=1, suffix=" px")
+        r["box"].setValue(self.profile(r)[2] if r["n_m3"] is None else r["n_m3"])
+        r["box"].valueChanged.connect(lambda _: self.mark_set(r, manual=True))
+        r["info"] = QLabel()
+        auto = QPushButton("Auto")
+        auto.clicked.connect(lambda: self.set_auto(r))
+        for j, w in enumerate((QLabel(r["label"]), r["box"], auto, r["info"])):
+            form.addWidget(w, i, j)
+
+    def profile(self, r):
+        """(radii, background-subtracted profile, auto M3) of the frame shown."""
+        img = np.asarray(Image.open(r["frames"][self.frame_box.value() - 1]), dtype=float)
+        data, radii, folded = calibrate(img, self.width, self.rmin, self.d_m3)
+        return radii, folded, float(data["n_m3_pixels"])
+
+    def draw(self):
         fig = self.canvas.figure
         fig.clear()
         axes = fig.subplots(len(self.recs), 1, squeeze=False)[:, 0]
         for ax, r in zip(axes, self.recs):
-            img = np.asarray(Image.open(r["frames"][self.frame_box.value() - 1]), dtype=float)
-            data, radii, folded = calibrate(img, self.width, self.rmin, self.d_m3)
-            r["auto"] = float(data["n_m3_pixels"])
-            if init:
-                saved = r["cal"] and r["cal"].get("gap_pixels") == self.width
-                r["box"].setValue(float(r["cal"]["n_m3_pixels"]) if saved else r["auto"])
-                # frame: the one the radius was set on in this window, None = not set here
-                r["manual"], r["frame"] = bool(saved and r["cal"].get("manual")), None
-                r["box"].valueChanged.connect(lambda _=0, r=r: self.mark_set(r, manual=True))
+            radii, folded, r["auto"] = self.profile(r)
             ax.plot(radii, folded, lw=1, color="black")
             ax.axvspan(0, self.rmin, color="grey", alpha=0.15, lw=0)
             ax.axvline(r["auto"], color="grey", ls=":", lw=1)
@@ -443,9 +445,8 @@ class CalibrationDialog(QDialog):
             ax.set_ylabel("I − convex hull", fontsize=8)
             ax.tick_params(labelsize=8)
             r["ax"] = ax
-            self.update_marker(r, redraw=False)
+            self.update_marker(r)
         axes[-1].set_xlabel("radius from centre (px)")
-        self.canvas.draw_idle()
 
     def mark_set(self, r, manual):
         r["manual"], r["frame"] = manual, self.frame_box.value()
@@ -455,14 +456,13 @@ class CalibrationDialog(QDialog):
         r["box"].setValue(r["auto"])
         self.mark_set(r, manual=self.frame_box.value() != 1)
 
-    def update_marker(self, r, redraw=True):
+    def update_marker(self, r):
         n = r["box"].value()
         r["line"].set_xdata([n, n])
         cal = from_m3(n, self.d_m3)
         r["info"].setText(f"lambda_sdd = {cal['lambda_sdd']:.1f} nm·px,  {cal['inv_nm_per_pixel']:.4g} nm⁻¹/px  "
                           f"({'manual' if r['manual'] else 'automatic'})")
-        if redraw:
-            self.canvas.draw_idle()
+        self.canvas.draw_idle()
 
     def click(self, event):
         if self.toolbar.mode or event.xdata is None:
