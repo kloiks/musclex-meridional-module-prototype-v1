@@ -1,0 +1,69 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+.env/
+ENV/
+.python-version
+.conda/
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Raw data (detector images, masters, Aurora DMC force files) ---
+qf_results/
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.ddf
+
+# --- Generated outputs (kymographs, calibration, plots) ---
+kymo/
+output/
+outputs/
+results/
+calibration.json
+calibration_projection.png
+meridian_w*_g*.npy
+meridian_w*_g*.json
+meridian_w*_g*_log.png
+meridian_w*_g*_force.png
+meridian_w*_g*_events.csv
+meridian_w*_g*_traces.csv
+*.npy
+*.npz
+
+# --- Logs / scratch ---
+*.log
+tmp/
+scratch/
