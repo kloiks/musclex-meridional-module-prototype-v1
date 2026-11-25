@@ -25,6 +25,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import cache
+
 PERCENTILES = (1.0, 99.5)
 
 
@@ -79,43 +81,40 @@ def plot_kymograph(kymo, pos, title, out_png, group=1, inv_nm_per_pixel=None):
 
 
 def cached_frames_kymograph(frames, out_dir, width):
-    """(kymo, pos, cached) per frame; reuses meridian_w<W>_g1.npy if it holds the same frames."""
+    """(kymo, pos, cached) per frame; reuses meridian_w<W>_g1.npy if it was made from the same
+    image files (cache.frames_hash)."""
     base = os.path.join(out_dir, f"meridian_w{width}_g1")
-    try:
-        with open(base + ".json") as f:
-            meta = json.load(f)
-        kymo = np.load(base + ".npy")
-        if meta["n_source_frames"] == len(frames) == kymo.shape[1]:
-            return kymo, np.arange(kymo.shape[0]) + meta["pos_start"], True
-    except (OSError, KeyError, ValueError):
-        pass
+    meta = cache.read_json(base + ".json")
+    if cache.matches(meta, {"frames_hash": cache.frames_hash(frames)}):
+        try:
+            kymo = np.load(base + ".npy")
+            if kymo.shape[1] == len(frames):
+                return kymo, np.arange(kymo.shape[0]) + meta["pos_start"], True
+        except (OSError, KeyError, ValueError):
+            pass
     return (*build_kymograph(frames, width), False)
 
 
 def make_kymograph(qf_folder, out_dir, width, group=1, inv_nm_per_pixel=None):
     """Build (or load from the per-frame cache), group and save; returns (npy path, cached)."""
     frames = find_frames(qf_folder)
+    frames_hash = cache.frames_hash(frames)  # before reading: images that change meanwhile are read again
     os.makedirs(out_dir, exist_ok=True)
     kymo, pos, cached = cached_frames_kymograph(frames, out_dir, width)
-    if not cached and group != 1:  # keep the per-frame kymograph as the cache
-        make_kymograph_files(qf_folder, frames, kymo, pos, out_dir, width, 1, inv_nm_per_pixel)
-    elif cached and group != 1:  # keep the cache's calibration current (multiscale reads it)
-        meta_path = os.path.join(out_dir, f"meridian_w{width}_g1.json")
-        with open(meta_path) as f:
-            meta = json.load(f)
-        if meta.get("inv_nm_per_pixel") != inv_nm_per_pixel:
-            meta["inv_nm_per_pixel"] = inv_nm_per_pixel
-            with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=2)
-    npy = make_kymograph_files(qf_folder, frames, group_frames(kymo, group), pos,
-                               out_dir, width, group, inv_nm_per_pixel)
+    for g in sorted({1, group}):  # the per-frame kymograph is the cache
+        npy = make_kymograph_files(qf_folder, frames, frames_hash, group_frames(kymo, g), pos,
+                                   out_dir, width, g, inv_nm_per_pixel, cached)
     return npy, cached
 
 
-def make_kymograph_files(qf_folder, frames, kymo, pos, out_dir, width, group, inv_nm_per_pixel):
-    """Write the .npy, .json sidecar and _log.png; returns the .npy path."""
+def make_kymograph_files(qf_folder, frames, frames_hash, kymo, pos, out_dir, width, group, inv_nm_per_pixel,
+                         cached):
+    """Write the .npy, .json sidecar and _log.png (if ``cached``, only what is out of date);
+    returns the .npy path."""
     base = os.path.join(out_dir, f"meridian_w{width}_g{group}")
-    np.save(base + ".npy", kymo)
+    saved = cache.read_json(base + ".json") if cached else {}
+    if not (cache.matches(saved, {"frames_hash": frames_hash}) and os.path.exists(base + ".npy")):
+        np.save(base + ".npy", kymo)
     meta = {
         "source": os.path.abspath(qf_folder),
         "width": width,
@@ -125,8 +124,11 @@ def make_kymograph_files(qf_folder, frames, kymo, pos, out_dir, width, group, in
         "pos_start": int(pos[0]),
         "first_frame": os.path.basename(frames[0]),
         "last_frame": os.path.basename(frames[-1]),
+        "frames_hash": frames_hash,
         "inv_nm_per_pixel": inv_nm_per_pixel,
     }
+    if saved == meta and os.path.exists(base + "_log.png"):
+        return base + ".npy"
     with open(base + ".json", "w") as f:
         json.dump(meta, f, indent=2)
     rec = os.path.basename(os.path.dirname(os.path.abspath(qf_folder)))

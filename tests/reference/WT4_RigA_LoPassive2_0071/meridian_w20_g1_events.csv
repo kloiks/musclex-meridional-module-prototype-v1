@@ -1,0 +1,18 @@
+event,source,time_s,frame,frame_exact,force_mN,length_Ref,detail
+Trigger,protocol,-0.750000,,-150.000,3.63335,0.292243,0
+kymograph start,kymograph,0.000000,0,0.000,3.60156,0.292726,column 0 opens
+Trigger,protocol,0.000000,0,0.000,3.60156,0.292726,3
+Ramp Length Out start,protocol,0.100000,19,20.000,3.60156,0.291436,"0.05, 0.05"
+length change 1 start,length trace,0.102500,20,20.500,3.63335,0.292243,"lengthening of +0.6239 Ref begins, from 0.2914 Ref"
+Ramp Length Out end,protocol,0.150000,30,30.000,14.1321,0.887473,"0.05, 0.05"
+length change 1 end,length trace,0.153000,30,30.600,13.5912,0.917162,"lengthening of +0.6239 Ref done after 50.5 ms, at 0.9153 Ref"
+Trigger,protocol,0.200000,40,40.000,11.7142,0.915548,0
+beam off 1 start,kymograph,0.205000,41,41.000,11.587,0.915064,shutter shut
+beam off 1 end,kymograph,0.300000,60,60.000,11.0143,0.914419,shutter open
+Trigger,protocol,0.300000,60,60.000,11.0143,0.914419,1
+kymograph end,kymograph,0.400000,,80.000,10.6007,0.915225,last column closes
+Ramp Length Out start,protocol,0.700000,,140.000,10.6643,0.914903,"-0, 0.049"
+length change 2 start,length trace,0.703500,,140.700,10.1553,0.914419,"shortening of -0.6239 Ref begins, from 0.9152 Ref"
+Ramp Length Out end,protocol,0.749000,,149.800,2.1699,0.33242,"-0, 0.049"
+length change 2 end,length trace,0.752500,,150.500,2.77438,0.290952,"shortening of -0.6239 Ref done after 49.0 ms, at 0.2913 Ref"
+Stop,protocol,0.849000,,169.800,2.96518,0.291274,

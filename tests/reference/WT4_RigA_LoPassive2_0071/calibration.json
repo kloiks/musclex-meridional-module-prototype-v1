@@ -1,0 +1,9 @@
+{
+  "n_m3_pixels": 272,
+  "d_m3_nm": 14.34,
+  "lambda_sdd": 3900.48,
+  "inv_nm_per_pixel": 0.0002563787021084584,
+  "rmin_pixels": 250,
+  "gap_pixels": 20,
+  "image": "/home/irina/data/2026_09_22_Hessel/EDL_Lo/Passive/structure/WT4_RigA_LoPassive2_0071/qf_results/WT4_RigA_LoPassive2_0071_master_00001_folded_compressed.tif"
+}

@@ -62,6 +62,8 @@ meridian_w*_g*_events.csv
 meridian_w*_g*_traces.csv
 *.npy
 *.npz
+# reference outputs of the tests
+!tests/reference/**
 
 # --- Logs / scratch ---
 *.log

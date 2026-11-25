@@ -30,6 +30,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
+import cache
+
+CACHE_VERSION = 1           # raise when the figure or CSVs change, so saved ones are made again
 DEFAULT_FRAME_TIME = 0.005  # s
 DARK_FRACTION = 0.05        # of the median column sum => beam off
 DPI = 150
@@ -419,11 +422,21 @@ def column_time(meta, ddf=None, frame_time=None):
 
 
 def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None):
-    """Write <base>_force.png, _events.csv and _traces.csv; returns a summary string."""
+    """Write <base>_force.png, _events.csv and _traces.csv, or keep them if <base>_force.json says
+    they were made from the same data and settings; returns a summary string."""
     kymo = np.load(npy)
-    with open(os.path.splitext(npy)[0] + ".json") as f:
+    base = os.path.splitext(npy)[0]
+    with open(base + ".json") as f:
         meta = json.load(f)
     n_frames = kymo.shape[1]
+
+    key = dict(version=CACHE_VERSION, kymo_sha256=cache.array_hash(kymo), meta=meta, ddf=os.path.abspath(ddf_path),
+               ddf_sha256=cache.file_hash(ddf_path), pos_range=list(pos_range), stretch=stretch,
+               frame_time=frame_time, detector_frame_time=detector_frame_time(meta["source"]))
+    saved = cache.read_json(base + "_force.json")
+    if cache.matches(saved, key) and "summary" in saved and all(
+            os.path.exists(base + end) for end in ("_force.png", "_events.csv", "_traces.csv")):
+        return saved["summary"] + " (cached)"
 
     ddf, traces = load_traces(ddf_path)
     t0, dt, raw_dt, dt_source, how = column_time(meta, ddf, frame_time)
@@ -441,8 +454,7 @@ def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None)
     length = next((tr for tr in traces if tr["key"] == "length"), None)
     moves = length_changes(length["t"], length["y"]) if length else []
 
-    base = os.path.splitext(npy)[0]
-    rec = os.path.basename(os.path.dirname(meta["source"]))
+    rec =os.path.basename(os.path.dirname(meta["source"]))
     title = f"{rec} — kymograph with {ddf.name} mechanics"
     subtitle = (f"{os.path.basename(base)}  ·  positions {pos_c[0]}–{pos_c[-1]} px  ·  "
                 f"{n_frames} columns of {group} frame(s) at {raw_dt * 1e3:g} ms ({dt_source})\n"
@@ -462,7 +474,10 @@ def kymo_force(npy, ddf_path, pos_range=(0, 1200), stretch=1.4, frame_time=None)
         lines.append("beam off " + ", ".join(f"{a:.3f}–{b:.3f} s" for a, b in spans)
                      + " (should fall in a Trigger gap)")
     lines.append(f"wrote {base}_force.png, _events.csv, _traces.csv")
-    return "\n".join(lines)
+    summary = "\n".join(lines)
+    with open(base + "_force.json", "w") as f:
+        json.dump(dict(key, summary=summary), f, indent=2)
+    return summary
 
 
 def main():

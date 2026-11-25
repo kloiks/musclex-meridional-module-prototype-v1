@@ -38,13 +38,13 @@ import json
 import os
 
 import numpy as np
-from scipy.optimize import least_squares
-from scipy.ndimage import percentile_filter, uniform_filter1d
+from scipy.ndimage import uniform_filter1d
 from scipy.signal import find_peaks, peak_widths
-from scipy.stats import norm
 
-from calibrate_m3 import convex_hull_subtract
+import cache
+from background import fitted_backgrounds, profile_noise, shared_background
 from frames import excluded_mask, format_frames, parse_frames
+from labels import label_tracks, read_expected_peaks, write_labels
 
 # the multiscale_v3_c4_sc3 settings
 DEFAULTS = dict(
@@ -61,135 +61,6 @@ TRACK_KEYS = [k for k in DEFAULTS if k not in ("tol_pct", "min_frames")]
 
 # ------------------------------------------------------------------ detection
 
-def smoothed(profile, smooth):
-    p = np.asarray(profile, dtype=float)
-    return uniform_filter1d(p, smooth, mode="nearest") if smooth > 1 else p
-
-
-def flatten(profile, smooth, background=None):
-    """Profile minus its own convex hull, or minus a given background."""
-    p = smoothed(profile, smooth)
-    return convex_hull_subtract(p, 0) if background is None else p - background
-
-
-def hull_background(profile, smooth):
-    """The convex-hull background that flatten() removes from ``profile``."""
-    p = smoothed(profile, smooth)
-    return p - convex_hull_subtract(p, 0)
-
-
-# MuscleX bg_fitting general background, along the meridian:
-#   B(r) = baseline + A1 (s_exp(r) - s_exp(r_edge)) + A2 (s_comp2(r) - s_comp2(r_edge))
-# each kernel zeroed at the last radius so the baseline is the floor there.
-COMP2 = ("lorentzian", "powerlaw", "stretched")
-
-
-def radial_shape(r, scale, kernel, shape=None):
-    x = r / scale
-    if kernel == "exponential":
-        return np.exp(-x)
-    if kernel == "lorentzian":
-        return 1.0 / (1.0 + x * x)
-    if kernel == "powerlaw":  # shape = n
-        return (1.0 + x) ** -shape
-    if kernel == "stretched":  # shape = beta
-        return np.exp(-x ** shape)
-    raise ValueError(f"unknown kernel {kernel!r}")
-
-
-def background_model(params, r, comp2, edge):
-    """B(r) for params [baseline, A1, D1, A2, D2(, n | beta)], kernels zeroed at r = edge."""
-    b, a1, d1, a2, d2 = params[:5]
-    shape = params[5] if len(params) > 5 else None
-    out = b + a1 * (radial_shape(r, d1, "exponential") - radial_shape(edge, d1, "exponential"))
-    return out + a2 * (radial_shape(r, d2, comp2, shape) - radial_shape(edge, d2, comp2, shape))
-
-
-def initial_background(r, y, comp2):
-    """Baseline from the tail, exponential amplitude and decay from the head and log-slope
-    (MuscleX init_from_wedge); comp2 starts at 0.3x the amplitude and 3x the decay length."""
-    n_tail, n_head = max(3, len(y) // 5), max(2, len(y) // 20)
-    base = max(min(np.median(y[-n_tail:]), np.percentile(y, 2)), 0.0)
-    amp = max(np.median(y[:n_head]) - base, 1e-6)
-    above = y - base
-    ok = above > 0.02 * amp
-    slope = np.polyfit(r[ok], np.log(above[ok]), 1)[0] if ok.sum() >= 5 else 0.0
-    decay = -1.0 / slope if slope < 0 else 0.25 * (r[-1] - r[0])
-    decay = float(np.clip(decay, 1.0, 0.5 * r[-1]))
-    extra = {"powerlaw": [4.0], "stretched": [1.0]}.get(comp2, [])
-    return np.array([base, amp, decay, 0.3 * amp, min(3.0 * decay, r[-1])] + extra)
-
-
-def fit_background(profile, r, comp2, neg_weight, init=None):
-    """(background, params): the general background fitted to one profile with the
-    oversubtraction (model > data) residuals weighted ``neg_weight`` times.
-    ``init`` (params of a similar profile) warm-starts the fit."""
-    r_all = np.asarray(r, dtype=float)
-    y = np.asarray(profile, dtype=float)
-    use = np.isfinite(y) & (y > 0)  # detector gaps and masked pixels read 0
-    if use.sum() < 10:
-        return np.zeros(len(y)), init
-    norm = float(y[use].max())
-    r, y = r_all[use], y[use] / norm
-    shape_lo, shape_hi = {"powerlaw": ([0.5], [8.0]), "stretched": ([0.1], [3.0])}.get(comp2, ([], []))
-    lo = np.array([0.0, 0.0, 1.0, 0.0, 1.0] + shape_lo)
-    hi = np.array([np.inf, np.inf, 10.0 * r[-1], np.inf, 10.0 * r[-1]] + shape_hi)
-    if init is None:
-        x0 = initial_background(r, y, comp2)
-    else:  # amplitudes back into this profile's units
-        x0 = np.array(init, dtype=float)
-        x0[[0, 1, 3]] /= norm
-    x0 = np.clip(x0, lo + 1e-9, np.where(np.isfinite(hi), hi - 1e-9, np.inf))
-
-    def residuals(x):
-        res = y - background_model(x, r, comp2, r_all[-1])
-        return np.where(res < 0, neg_weight * res, res)
-
-    x = least_squares(residuals, x0, bounds=(lo, hi), max_nfev=600).x
-    x[[0, 1, 3]] *= norm
-    return background_model(x, r_all, comp2, r_all[-1]), x
-
-
-def fitted_backgrounds(ks, pos, p):
-    """Fitted background of every column of ``ks`` (smoothed as detect() sees it), each fit
-    warm-started from the previous column's; identical neighbouring columns are fitted once."""
-    out = np.empty(ks.shape)
-    params, last = None, None
-    for t in range(ks.shape[1]):
-        col = smoothed(ks[:, t], p["smooth"])
-        if last is not None and np.array_equal(col, last):
-            out[:, t] = out[:, t - 1]
-            continue
-        out[:, t], params = fit_background(col, pos, p["bg_comp2"], p["bg_neg_weight"], params)
-        last = col
-    return out
-
-
-def column_backgrounds(ks, pos, p):
-    """The background each column's own baseline removes (hull or fit), as columns."""
-    if p["bg_method"] == "fit":
-        return fitted_backgrounds(ks, pos, p)
-    return np.column_stack([hull_background(ks[:, t], p["smooth"]) for t in range(ks.shape[1])])
-
-
-def shared_background(kymo, pos, p):
-    """With background = averaged, the background of the mean profile; else None (per column)."""
-    if p["background"] != "averaged":
-        return None
-    return column_backgrounds(kymo.mean(axis=1, keepdims=True), pos, p)[:, 0]
-
-
-def local_noise(flat, win, pct, ref=None, smooth=1):
-    """Rolling noise sigma from |second differences| (estimated off the unsmoothed ``ref``)."""
-    src = flat if ref is None else ref
-    d2 = np.abs(np.diff(src, n=2, prepend=src[0], append=src[-1]))
-    sigma = percentile_filter(d2, pct, size=win, mode="nearest") / (norm.ppf((1 + pct / 100) / 2) * np.sqrt(6))
-    if ref is not None and smooth > 1:
-        sigma = sigma / np.sqrt(smooth)
-    positive = sigma[sigma > 0]
-    return np.maximum(sigma, max(np.percentile(positive, 5) if positive.size else 0.0, 1e-9))
-
-
 def parabolic_offset(y, idx):
     out = np.zeros(len(idx))
     for n, i in enumerate(idx):
@@ -198,13 +69,6 @@ def parabolic_offset(y, idx):
             if den != 0:
                 out[n] = np.clip(0.5 * (y[i - 1] - y[i + 1]) / den, -1.0, 1.0)
     return out
-
-
-def profile_noise(profile, p, background=None):
-    """(flat, sigma): the baseline-removed profile and its local noise, as detect() sees them."""
-    flat = flatten(profile, p["smooth"], background)
-    ref = flatten(profile, 1, background) if p["smooth"] > 1 else None
-    return flat, local_noise(flat, p["noise_win"], p["noise_pct"], ref, p["smooth"])
 
 
 def detect(profile, r0, p, background=None):
@@ -374,56 +238,10 @@ def build_tracks(series, scales, res, n, frames):
     return rows
 
 
-# ------------------------------------------------------------------ labelling
-
-def read_expected_peaks(path):
-    """[(name, d_nm, tol_pct or None)] from a name,d_nm,tol_pct CSV (# lines are comments)."""
-    with open(path) as f:
-        rows = list(csv.DictReader(line for line in f if not line.startswith("#")))
-    return [(r["name"].strip(), float(r["d_nm"]),
-             float(r["tol_pct"]) if (r.get("tol_pct") or "").strip() else None) for r in rows]
-
-
-def label_windows(peaks, tol_pct):
-    """[(name, d0, half-window in nm)] sorted by d0, capped at half the gap to the neighbours."""
-    peaks = sorted(peaks, key=lambda x: x[1])
-    windows = []
-    for i, (name, d0, tol) in enumerate(peaks):
-        tol = d0 * (tol if tol is not None else tol_pct) / 100  # % of d0 -> nm
-        gaps = [abs(d0 - peaks[j][1]) for j in (i - 1, i + 1) if 0 <= j < len(peaks)]
-        windows.append((name, d0, min([tol] + [g / 2 for g in gaps])))
-    return windows
-
-
-def label_anchors(rows, inv_nm, peaks, tol_pct, min_frames):
-    """{anchor: (name, d_nm, d - d0)}: one-to-one, closest pair first."""
-    by = {}
-    for r in rows:
-        by.setdefault(r["track"], []).append(r["r"])
-    d_of = {a: 1.0 / (np.median(rr) * inv_nm) for a, rr in by.items() if len(rr) >= min_frames}
-    windows = label_windows(peaks, tol_pct)
-    pairs = sorted((abs(d - d0), a, name, d, d - d0) for a, d in d_of.items()
-                   for name, d0, tol in windows if abs(d - d0) <= tol)
-    out, taken = {}, set()
-    for _, a, name, d, dd in pairs:
-        if a not in out and name not in taken:
-            out[a] = (name, d, dd)
-            taken.add(name)
-    return out
-
-
 # ------------------------------------------------------------------ run
 
 def _fmt(v):
     return f"{v:.5g}" if isinstance(v, float) else v
-
-
-def write_labels(out_dir, labels):
-    with open(os.path.join(out_dir, "labels.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["anchor", "label", "d_nm", "dd_nm"])
-        for a, (name, d, dd) in sorted(labels.items(), key=lambda kv: kv[1][1]):
-            w.writerow([a, name, f"{d:.4f}", f"{dd:+.4f}"])
 
 
 def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
@@ -440,19 +258,13 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
     peaks = read_expected_peaks(peaks_csv) if peaks_csv else []
     seed_d = sorted(d for _, d, _ in peaks
                     if inv_nm and p["seed_anchors"] == "yes" and p["rmin"] <= 1.0 / (d * inv_nm) <= p["rmax"])
-    key = dict({k: p[k] for k in TRACK_KEYS}, kymo=os.path.abspath(npy),
+    key = dict({k: p[k] for k in TRACK_KEYS}, kymo=os.path.abspath(npy), kymo_sha256=cache.array_hash(kymo),
                n_frames_source=int(kymo.shape[1]), inv_nm_per_pixel=inv_nm, seed_d=seed_d,
                exclude=exclude)
 
-    cached = False
-    try:
-        with open(run_json) as f:
-            run = json.load(f)
-        if {k: run.get(k) for k in key} == key and os.path.exists(os.path.join(out_dir, "multiscale.npz")):
-            cached = True
-    except (OSError, ValueError):
-        pass
-
+    run = cache.read_json(run_json)
+    cached = cache.matches(run, key) and all(os.path.exists(os.path.join(out_dir, name))
+                                             for name in ("multiscale.npz", "tracks.csv"))
     if cached:
         with open(os.path.join(out_dir, "tracks.csv")) as f:
             rows = [dict(r, track=int(r["track"]), r=float(r["r"])) for r in csv.DictReader(f)]
@@ -486,7 +298,7 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
 
     labels = {}
     if inv_nm and peaks:
-        labels = label_anchors(rows, inv_nm, peaks, p["tol_pct"], p["min_frames"])
+        labels = label_tracks(rows, inv_nm, peaks, p["tol_pct"], p["min_frames"])
     write_labels(out_dir, labels)
 
     dropped = run["dropped_frames"]

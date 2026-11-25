@@ -20,7 +20,6 @@ Example:
 """
 import argparse
 import csv
-import hashlib
 import json
 import os
 
@@ -28,8 +27,11 @@ import numpy as np
 from scipy.ndimage import median_filter
 from scipy.optimize import linear_sum_assignment
 
+import cache
 import multiscale
+from background import column_backgrounds, shared_background, smoothed
 from frames import excluded_mask, format_frames, parse_frames
+from labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
 
 MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "new_w61.pt")
 DEFAULTS = dict(unet_threshold=0.4, unet_gate=10, unet_memory=10, unet_min_length=20)
@@ -156,31 +158,6 @@ def link(frame, r, score, gate, memory, min_length):
     return [t for t in tracks if len(t) >= min_length]
 
 
-def label_tracks(rows, inv_nm, peaks, tol_pct, min_frames):
-    """{track: (name, d_nm, d - d0)}: closest first; a name is reused only for tracks without
-    a common frame."""
-    r_of, frames_of = {}, {}
-    for row in rows:
-        r_of.setdefault(row["track"], []).append(row["r"])
-        frames_of.setdefault(row["track"], set()).add(row["frame"])
-    d_of = {a: 1.0 / (np.median(rr) * inv_nm) for a, rr in r_of.items() if len(rr) >= min_frames}
-    pairs = sorted((abs(d - d0), a, name, d, d - d0) for a, d in d_of.items()
-                   for name, d0, tol in multiscale.label_windows(peaks, tol_pct) if abs(d - d0) <= tol)
-    out, used = {}, {}
-    for _, a, name, d, dd in pairs:
-        if a not in out and not used.get(name, set()) & frames_of[a]:
-            out[a] = (name, d, dd)
-            used.setdefault(name, set()).update(frames_of[a])
-    return out
-
-
-def unmatched_names(r, labels):
-    """{track: "X1", "X2", ...} for the tracks without a label, numbered from the centre out
-    (by median r); ``r`` is (track x frame)."""
-    rest = sorted((a for a in range(len(r)) if a not in labels), key=lambda a: np.nanmedian(r[a]))
-    return {a: f"X{i + 1}" for i, a in enumerate(rest)}
-
-
 # ------------------------------------------------------------------ run
 
 def detect(kymo, pos, p, frames):
@@ -200,9 +177,9 @@ def detect(kymo, pos, p, frames):
     # heights above the same baseline the viewer subtracts
     keep_r = (pos >= p["rmin"]) & (pos <= p["rmax"])
     base, pos = k[keep_r], pos[keep_r]
-    shared = multiscale.shared_background(base, pos, p)
-    bg = multiscale.column_backgrounds(base, pos, p) if shared is None else shared[:, None]
-    flat = np.column_stack([multiscale.smoothed(base[:, t], p["smooth"]) for t in range(len(frames))]) - bg
+    shared = shared_background(base, pos, p)
+    bg = column_backgrounds(base, pos, p) if shared is None else shared[:, None]
+    flat = np.column_stack([smoothed(base[:, t], p["smooth"]) for t in range(len(frames))]) - bg
     height = np.full(r.shape, np.nan)
     for t in range(len(frames)):
         ok = np.isfinite(r[:, t])
@@ -221,22 +198,14 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
     pos = np.arange(kymo.shape[0]) + meta.get("pos_start", 0)
     drop = excluded_mask(kymo, p, exclude)
     frames = np.flatnonzero(~drop)
-    with open(MODEL, "rb") as f:
-        sha = hashlib.sha256(f.read()).hexdigest()
-    key = dict({k: p[k] for k in KEYS}, detector="unet", model=os.path.basename(MODEL), model_sha256=sha,
-               kymo=os.path.abspath(npy), kymo_sha256=hashlib.sha256(kymo.tobytes()).hexdigest(),
+    key = dict({k: p[k] for k in KEYS}, detector="unet", model=os.path.basename(MODEL),
+               model_sha256=cache.file_hash(MODEL), kymo=os.path.abspath(npy), kymo_sha256=cache.array_hash(kymo),
                n_frames_source=int(kymo.shape[1]), inv_nm_per_pixel=inv_nm,
                dropped_frames=np.flatnonzero(drop).tolist())
 
     os.makedirs(out_dir, exist_ok=True)
     run_json, npz = os.path.join(out_dir, "run.json"), os.path.join(out_dir, "unet.npz")
-    cached = False
-    try:
-        with open(run_json) as f:
-            run = json.load(f)
-        cached = {k: run.get(k) for k in key} == key and os.path.exists(npz)
-    except (OSError, ValueError):
-        pass
+    cached = cache.matches(cache.read_json(run_json), key) and os.path.exists(npz)
     if cached:
         with np.load(npz) as data:
             r, height, score = data["r"][0], data["height"][0], data["score"]
@@ -249,9 +218,10 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
 
     rows = [dict(track=int(a), frame=int(frames[t]), r=float(r[a, t]), height=float(height[a, t]),
                  score=float(score[a, t])) for a, t in zip(*np.nonzero(np.isfinite(r)))]
-    peaks = multiscale.read_expected_peaks(peaks_csv) if peaks_csv else []
-    labels = label_tracks(rows, inv_nm, peaks, p["tol_pct"], p["min_frames"]) if inv_nm and peaks else {}
-    multiscale.write_labels(out_dir, labels)
+    peaks = read_expected_peaks(peaks_csv) if peaks_csv else []
+    labels = (label_tracks(rows, inv_nm, peaks, p["tol_pct"], p["min_frames"], share_names=True)
+              if inv_nm and peaks else {})
+    write_labels(out_dir, labels)
     names = {**{a: v[0] for a, v in labels.items()}, **unmatched_names(r, labels)}
     with open(os.path.join(out_dir, "tracks.csv"), "w", newline="") as f:
         w = csv.writer(f)

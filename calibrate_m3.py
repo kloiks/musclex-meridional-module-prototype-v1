@@ -15,25 +15,10 @@ import os
 
 import numpy as np
 from PIL import Image
-from scipy.interpolate import PchipInterpolator
+
+from background import convex_hull_subtract
 
 D_M3_NM = 14.34  # 42.9 / 3
-
-
-def convex_hull_subtract(y, start):
-    """Subtract the lower convex hull of y[start:] (MuscleX convexHull); zero below start."""
-    y = np.asarray(y, dtype=float)
-    seg = y[start:]
-    out = np.zeros_like(y)
-    if seg.size < 5:
-        return out
-    hull, i = [0], 0
-    while i < seg.size - 1:  # next hull vertex: the point of minimum slope from i
-        i += 1 + int(np.argmin((seg[i + 1:] - seg[i]) / np.arange(1, seg.size - i)))
-        hull.append(i)
-    background = PchipInterpolator(hull, seg[hull])(np.arange(seg.size))
-    out[start:] = np.clip(seg - background, 0, None)
-    return out
 
 
 def meridional_profile(img, gap):
