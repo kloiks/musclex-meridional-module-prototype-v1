@@ -31,10 +31,10 @@ from typing import NamedTuple
 import numpy as np
 from PIL import Image
 
-import cache
-from background import column_backgrounds, convex_hull_subtract, smoothed
-from frames import parse_frames
-from kymograph import find_frames, load_kymograph
+from . import cache
+from .background import column_backgrounds, convex_hull_subtract, smoothed
+from .frames import parse_frames
+from .kymograph import find_frames, load_kymograph
 
 BETWEEN = (("none", "None (no normalization)"),
            ("ls", "Least squares (log mean profiles, meridian + equator)"),

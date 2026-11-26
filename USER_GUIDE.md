@@ -17,7 +17,7 @@ For each recording it:
 
 ## Quick start
 
-1. Start the app: `python kymo_gui.py`
+1. Start the app: `meridional-gui` (or `python -m meridional`)
 2. Click **QF folder…** and choose the images. Optionally choose a **DDF file…** and an **Output…** folder (default: `kymo` inside the image folder).
 3. Fill in row 2 to compare a second recording. **+ Add third folder** adds another.
 4. Next to **Process patterns using**, click one of the detectors:
@@ -210,31 +210,31 @@ Smoothing changes the plotted lines only, not the saved data. The **Background i
 
 ## CLI commands
 
-Run these from the project folder. Add `--help` to any script except `kymo_gui.py` to see its options.
+Run these from the project folder after `pip install -e .`. Add `--help` to any script except the GUI to see its options. Each step also has a command: `meridional-calibrate`, `meridional-kymograph`, `meridional-force`, `meridional-multiscale`, `meridional-unet`, `meridional-maxflow`.
 
 **Install and start the app**
 
 ```sh
-pip install -r requirements.txt
-python kymo_gui.py
+pip install -e .
+meridional-gui            # or: python -m meridional
 ```
 
 **Run the steps one by one** (replace the example paths)
 
 ```sh
 # 1. Calibrate on the first image
-python calibrate_m3.py qf_results/frame_00001_folded_compressed.tif --gap 20 --rmin 250 -o cal.json --debug
+python -m meridional.calibrate_m3 qf_results/frame_00001_folded_compressed.tif --gap 20 --rmin 250 -o cal.json --debug
 
 # 2. Build the kymograph
-python kymograph.py qf_results --width 20 --calibration cal.json --out-dir qf_results/kymo
+python -m meridional.kymograph qf_results --width 20 --calibration cal.json --out-dir qf_results/kymo
 
 # 3. Add force and length (optional)
-python kymo_force.py qf_results/kymo/meridian_w20_g1.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
+python -m meridional.kymo_force qf_results/kymo/meridian_w20_g1.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
 
 # 4. Find the peaks: use any one
-python multiscale.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
-python unet.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
-python maxflow.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
+python -m meridional.multiscale qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
+python -m meridional.unet qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
+python -m meridional.maxflow qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
 ```
 
 | Script | Option | Meaning |

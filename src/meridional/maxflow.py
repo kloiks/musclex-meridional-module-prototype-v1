@@ -42,12 +42,12 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
-import cache
-import multiscale
-import tracking
-from background import shared_background
-from frames import format_frames
-from labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
+from . import cache
+from . import multiscale
+from . import tracking
+from .background import shared_background
+from .frames import format_frames
+from .labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
 
 # guided_maxflow in meridional-simulation/sh_scripts/create_simulations_track.sh
 DEFAULTS = dict(
@@ -384,5 +384,9 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
     return summary, cached
 
 
-if __name__ == "__main__":
+def main():
     tracking.run_cli(process, "maxflow", __doc__)
+
+
+if __name__ == "__main__":
+    main()

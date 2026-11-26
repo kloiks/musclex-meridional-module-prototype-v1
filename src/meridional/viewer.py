@@ -5,11 +5,11 @@ import numpy as np
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
-from controls import ContrastRow, RangeRows, SmoothingRow, TimeSliders, canvas
-from plots import Projection, broken, d_ticks, panel_row, smooth_series, style_time_axis, time_line
-from normalization import find_beamlog, plan
-from params import load_params
-from recording import group_options, load_recording
+from .controls import ContrastRow, RangeRows, SmoothingRow, TimeSliders, canvas
+from .plots import Projection, broken, d_ticks, panel_row, smooth_series, style_time_axis, time_line
+from .normalization import find_beamlog, plan
+from .params import load_params
+from .recording import group_options, load_recording
 
 COLORS = ("#2b7fff", "#e8590c", "#2f9e44")
 UNMATCHED_COLOR = "#7a3fb5"

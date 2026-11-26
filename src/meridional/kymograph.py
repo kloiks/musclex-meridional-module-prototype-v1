@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 from matplotlib.figure import Figure
 
-import cache
+from . import cache
 
 PERCENTILES = (1.0, 99.5)
 

@@ -39,10 +39,10 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.signal import find_peaks, peak_widths
 
-import tracking
-from background import fitted_backgrounds, profile_noise, shared_background
-from frames import format_frames
-from labels import label_tracks, read_expected_peaks, write_labels
+from . import tracking
+from .background import fitted_backgrounds, profile_noise, shared_background
+from .frames import format_frames
+from .labels import label_tracks, read_expected_peaks, write_labels
 
 # the multiscale_v3_c4_sc3 settings
 DEFAULTS = dict(
@@ -296,5 +296,9 @@ def process(npy, out_dir, params=None, peaks_csv=None, exclude=None):
     return summary, cached
 
 
-if __name__ == "__main__":
+def main():
     tracking.run_cli(process, "multiscale", __doc__)
+
+
+if __name__ == "__main__":
+    main()

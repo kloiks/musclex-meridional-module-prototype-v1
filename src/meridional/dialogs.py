@@ -12,13 +12,13 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-import cache
-from calibrate_m3 import calibrate, from_m3
-from controls import canvas
-from frames import blank_frames, format_frames, load_excluded, parse_frames, save_excluded
-from kymograph import cached_kymograph, find_frames
-from normalization import BETWEEN, find_beamlog, plan
-from params import DEFAULTS, PEAKS_CSV, load_params, save_params
+from . import cache
+from .calibrate_m3 import calibrate, from_m3
+from .controls import canvas
+from .frames import blank_frames, format_frames, load_excluded, parse_frames, save_excluded
+from .kymograph import cached_kymograph, find_frames
+from .normalization import BETWEEN, find_beamlog, plan
+from .params import DEFAULTS, PEAKS_CSV, load_params, save_params
 
 # (group, [(key, label, choices or None)]); the widget type follows the default's type
 PARAM_GROUPS = [

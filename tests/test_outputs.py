@@ -21,18 +21,19 @@ import unittest.mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
+SRC = os.path.join(os.path.dirname(HERE), "src")
+sys.path.insert(0, SRC)  # works without `pip install -e .`
 
 import numpy as np
 from PIL import Image
 
-import kymo_force
-import kymograph
-import multiscale
-import unet
-from calibrate_m3 import calibrate_file, meridional_profile
-from frames import blank_frames
-from recording import Job
+from meridional import kymo_force
+from meridional import kymograph
+from meridional import multiscale
+from meridional import unet
+from meridional.calibrate_m3 import calibrate_file, meridional_profile
+from meridional.frames import blank_frames
+from meridional.recording import Job
 
 STRUCTURE = os.environ.get("KYMO_TEST_DATA", "/home/irina/data/2026_09_22_Hessel/EDL_Lo/Passive/structure")
 RECORDINGS = ("WT4_RigA_LoPassive2_0071", "WT4_RigA_LoPassive1_0070")
@@ -74,6 +75,13 @@ def delete_widget(widget):
         shiboken6.delete(widget)
 
 
+def run_module(module, *args):
+    """Run ``python -m meridional.<module> args`` and return the CompletedProcess."""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [SRC, os.environ.get("PYTHONPATH")])))
+    return subprocess.run([sys.executable, "-m", f"meridional.{module}", *args],
+                          capture_output=True, text=True, env=env)
+
+
 def have_data(rec):
     return os.path.isdir(os.path.join(STRUCTURE, rec, "qf_results"))
 
@@ -90,7 +98,7 @@ def run_pipeline(rec, out):
     summary = kymo_force.kymo_force(npy, ddf, (PARAMS["pos_lo"], PARAMS["pos_hi"]), PARAMS["stretch"])
     cached["force"] = summary.endswith("(cached)")
     for detector in (multiscale, unet):
-        name = detector.__name__
+        name = detector.__name__.rsplit(".", 1)[-1]
         _, cached[name] = detector.process(npy, os.path.join(out, f"{name}_w{W}"), PARAMS, PEAKS)
     return cached
 
@@ -181,8 +189,8 @@ class TestRecordings(unittest.TestCase):
         """Both detectors offer groupings 1, 2, 4, 8, 16, and each one is shown."""
         if len(self.out) < len(RECORDINGS):
             self.skipTest(f"no data in {STRUCTURE}")
-        from recording import GROUPS
-        from viewer import Viewer
+        from meridional.recording import GROUPS
+        from meridional.viewer import Viewer
         qt_app()
         for detector in ("multiscale", "unet"):
             view = Viewer()
@@ -334,7 +342,6 @@ class TestTrackingCache(unittest.TestCase):
         self.assertFalse(self.process())
 
     def test_command_lines(self):
-        root = os.path.dirname(HERE)
         qf = os.path.join(self.tmp, "rec", "qf_results")
         os.makedirs(qf)
         tif = os.path.join(qf, "f_1.tif")
@@ -342,11 +349,10 @@ class TestTrackingCache(unittest.TestCase):
         Image.fromarray((500.0 - r + 90 * np.exp(-0.5 * ((r - 150) / 2.0) ** 2) * np.ones(401))
                         .astype(np.float32)).save(tif)
         cal = os.path.join(self.tmp, "cal.json")
-        for args in (["calibrate_m3.py", tif, "--rmin", "100", "-o", cal, "--debug"],
-                     ["kymograph.py", qf, "--calibration", cal],
-                     ["multiscale.py", self.npy, "--peaks", PEAKS, "--exclude", "0-1"]):
-            run = subprocess.run([sys.executable, os.path.join(root, args[0])] + args[1:],
-                                 capture_output=True, text=True)
+        for args in (["calibrate_m3", tif, "--rmin", "100", "-o", cal, "--debug"],
+                     ["kymograph", qf, "--calibration", cal],
+                     ["multiscale", self.npy, "--peaks", PEAKS, "--exclude", "0-1"]):
+            run = run_module(*args)
             self.assertEqual(run.returncode, 0, run.stderr)
         with open(os.path.join(qf, "kymo", "meridian_w20_g1.json")) as f:
             self.assertAlmostEqual(json.load(f)["inv_nm_per_pixel"], 1 / (150 * 14.34))
@@ -358,10 +364,9 @@ class TestTrackingCache(unittest.TestCase):
         if not have_data(rec):
             self.skipTest(f"no data in {STRUCTURE}")
         ddf = glob.glob(os.path.join(STRUCTURE, rec, "*.ddf"))[0]
-        for args in (["kymo_force.py", self.npy, ddf, "--pos-range", "0", "200"],
-                     ["unet.py", self.npy, "--peaks", PEAKS]):
-            run = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), args[0])] + args[1:],
-                                 capture_output=True, text=True)
+        for args in (["kymo_force", self.npy, ddf, "--pos-range", "0", "200"],
+                     ["unet", self.npy, "--peaks", PEAKS]):
+            run = run_module(*args)
             self.assertEqual(run.returncode, 0, run.stderr)
         self.assertTrue(os.path.exists(self.npy[:-4] + "_force.png"))
         self.assertTrue(os.path.exists(os.path.join(self.tmp, "unet_w20", "tracks.csv")))
@@ -369,7 +374,7 @@ class TestTrackingCache(unittest.TestCase):
 
 class TestSmoothing(unittest.TestCase):
     def test_series(self):
-        from plots import smooth_series
+        from meridional.plots import smooth_series
         h, frames = np.arange(12.0), np.r_[0:6, 10:16]  # frames 6-9 excluded
         h[2] = np.nan
         np.testing.assert_array_equal(smooth_series(h, frames, 1), h)
@@ -379,7 +384,7 @@ class TestSmoothing(unittest.TestCase):
         self.assertEqual((even[4], even[9]), (4.0, 8.5))  # frames i-2 ... i+1, without the NaN
 
     def test_viewer_defaults(self):
-        from viewer import Viewer
+        from meridional.viewer import Viewer
         qt_app()
         view = Viewer()
         self.addCleanup(delete_widget, view)
@@ -391,8 +396,8 @@ class TestBackgroundSection(unittest.TestCase):
     """Its range and x controls are its own, and set the area; tracks and heights have theirs."""
 
     def test_independent(self):
-        from recording import Recording
-        from viewer import Viewer
+        from meridional.recording import Recording
+        from meridional.viewer import Viewer
         qt_app()
         view = Viewer()
         self.addCleanup(delete_widget, view)
@@ -449,8 +454,8 @@ class TestBackgroundSection(unittest.TestCase):
 
 class TestPeaksField(unittest.TestCase):
     def test_prefixes(self):
-        from labels import read_expected_peaks
-        from viewer import Viewer
+        from meridional.labels import read_expected_peaks
+        from meridional.viewer import Viewer
         qt_app()
         view = Viewer()
         self.addCleanup(delete_widget, view)
@@ -474,7 +479,7 @@ class TestPeaksField(unittest.TestCase):
 
 class TestRecording(unittest.TestCase):
     def test_scale_for(self):
-        from recording import Recording
+        from meridional.recording import Recording
         n = 40
         rec = Recording(label="", color="", traces=[], dt=0.005, inv=1e-3, detector="multiscale",
                         params=multiscale.DEFAULTS, n_source=50, frames=np.arange(5, 45), pos=np.arange(20),
@@ -492,8 +497,8 @@ class TestOtherDialogs(unittest.TestCase):
     """Opening and saving against a temporary config folder changes nothing."""
 
     def setUp(self):
-        import dialogs
-        import params
+        from meridional import dialogs
+        from meridional import params
         qt_app()
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp)
@@ -510,19 +515,19 @@ class TestOtherDialogs(unittest.TestCase):
             return f.read()
 
     def test_save_unchanged(self):
-        from dialogs import BackgroundDialog, ExpectedPeaksDialog, ParametersDialog
+        from meridional.dialogs import BackgroundDialog, ExpectedPeaksDialog, ParametersDialog
         before = self.read("expected_peaks.csv"), json.loads(self.read("parameters.json"))
         for kind in (BackgroundDialog, ExpectedPeaksDialog, ParametersDialog):
             d = kind(None)
             self.addCleanup(delete_widget, d)
             d.save()
-        from params import DEFAULTS
+        from meridional.params import DEFAULTS
         self.assertEqual(before[0], self.read("expected_peaks.csv"))
         self.assertEqual({k: v for k, v in before[1].items() if k in DEFAULTS},
                          json.loads(self.read("parameters.json")))
 
     def test_background_choice(self):
-        from dialogs import BackgroundDialog
+        from meridional.dialogs import BackgroundDialog
         d = BackgroundDialog(None)
         self.addCleanup(delete_widget, d)
         d.methods["fit"].setChecked(True)
@@ -533,8 +538,8 @@ class TestOtherDialogs(unittest.TestCase):
         self.assertEqual((p["bg_method"], p["background"], p["bg_comp2"]), ("fit", "averaged", "stretched"))
 
     def test_excluded_frames(self):
-        from dialogs import ParametersDialog
-        from frames import load_excluded
+        from meridional.dialogs import ParametersDialog
+        from meridional.frames import load_excluded
         qf, out = os.path.join(self.tmp, "rec", "qf_results"), os.path.join(self.tmp, "out")
         os.makedirs(qf)
         for i in range(10):
@@ -561,7 +566,7 @@ class TestScaleRatio(unittest.TestCase):
                 multiscale.scale_ladder(59, base)
 
     def test_dialog_minimum(self):
-        from dialogs import ParametersDialog
+        from meridional.dialogs import ParametersDialog
         qt_app()
         d = ParametersDialog(None)
         self.addCleanup(delete_widget, d)
@@ -588,7 +593,7 @@ class TestCalibrationDialog(unittest.TestCase):
         self.path = os.path.join(self.job.out, "calibration.json")
 
     def dialog(self, frame=1):
-        from dialogs import CalibrationDialog
+        from meridional.dialogs import CalibrationDialog
         d = CalibrationDialog(None, [self.job], 20, 30, 14.34)
         self.addCleanup(delete_widget, d)
         d.frame_box.setValue(frame)
@@ -630,7 +635,7 @@ class TestNormalization(unittest.TestCase):
     """normalization.py: I0 factors, flicker, the beamline log and the between-sequence scales."""
 
     def test_i0_removes_beam_flicker(self):
-        import normalization as N
+        from meridional import normalization as N
         rng = np.random.default_rng(0)
         frames = np.r_[0:40, 60:80]
         i0 = 1e4 * (1 + 0.02 * rng.standard_normal(80))
@@ -643,7 +648,7 @@ class TestNormalization(unittest.TestCase):
         self.assertIsNone(N.i0_factors(i0[:50], frames))     # log shorter than the recording
 
     def test_read_beamlog(self):
-        import normalization as N
+        from meridional import normalization as N
         run = os.path.join(tempfile.mkdtemp(), "Run_0001")
         self.addCleanup(shutil.rmtree, os.path.dirname(run))
         os.makedirs(os.path.join(run, "qf_results"))
@@ -659,7 +664,7 @@ class TestNormalization(unittest.TestCase):
 
     def test_least_squares_matches_general_solution(self):
         """The closed form equals the pairwise weighted least squares of scale_methods.md."""
-        import normalization as N
+        from meridional import normalization as N
         rng = np.random.default_rng(1)
         regions = {}
         for key, n_r in (("mer", 50), ("eq", 30)):
@@ -678,7 +683,7 @@ class TestNormalization(unittest.TestCase):
 
     def test_scaled_copies_are_aligned(self):
         """Sequences that differ only by a factor come out with the inverse factors, by each method."""
-        import normalization as N
+        from meridional import normalization as N
         r = np.arange(700.0)
         mer = 50 * np.exp(-r / 150) + 5 + 20 * np.exp(-(r - 270) ** 2 / 8)
         eq = 80 * np.exp(-r / 100) + 3 + 40 * np.exp(-(r - 113) ** 2 / 18)

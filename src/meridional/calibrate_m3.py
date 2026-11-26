@@ -17,8 +17,8 @@ import numpy as np
 from PIL import Image
 from matplotlib.figure import Figure
 
-import cache
-from background import convex_hull_subtract
+from . import cache
+from .background import convex_hull_subtract
 
 D_M3_NM = 14.34  # 42.9 / 3
 

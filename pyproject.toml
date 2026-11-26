@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meridional"
+version = "0.1.0"
+description = "MuscleX meridional module prototype: kymographs, peak tracking and force alignment"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "scipy",
+    "pillow",
+    "matplotlib",
+    "h5py",
+    "PySide6",
+    "torch",
+]
+
+[project.scripts]
+meridional-gui = "meridional.kymo_gui:main"
+meridional-calibrate = "meridional.calibrate_m3:main"
+meridional-kymograph = "meridional.kymograph:main"
+meridional-force = "meridional.kymo_force:main"
+meridional-multiscale = "meridional.multiscale:main"
+meridional-unet = "meridional.unet:main"
+meridional-maxflow = "meridional.maxflow:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -3,8 +3,8 @@
 M3 calibration, meridional kymographs (optionally with force/length from an Aurora DMC `.ddf`) and multiscale peak tracking for quadrant-folded image folders.
 
 ```sh
-pip install -r requirements.txt
-python kymo_gui.py
+pip install -e .
+meridional-gui            # or: python -m meridional
 ```
 
 GUI: pick one to three `qf_results` folders, each with an optional `.ddf` and an output folder (default `<qf folder>/kymo`), then, next to **Process patterns using**, **Multiscale peak detection**. **Clear second folder** empties the second row and removes its kymograph from the viewer without rerunning.
@@ -35,11 +35,11 @@ Per folder it writes:
 The scripts also run on their own:
 
 ```sh
-python calibrate_m3.py frame_00001_folded_compressed.tif --gap 20 --rmin 250 --debug
-python kymograph.py qf_results --width 20 --calibration cal.json
-python multiscale.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
-python unet.py qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --exclude "0-1, 40-60"
-python kymo_force.py qf_results/kymo/meridian_w20_g1.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
+python -m meridional.calibrate_m3 frame_00001_folded_compressed.tif --gap 20 --rmin 250 --debug
+python -m meridional.kymograph qf_results --width 20 --calibration cal.json
+python -m meridional.multiscale qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --params config/parameters.json
+python -m meridional.unet qf_results/kymo/meridian_w20_g1.npy --peaks config/expected_peaks.csv --exclude "0-1, 40-60"
+python -m meridional.kymo_force qf_results/kymo/meridian_w20_g1.npy LoActive1.ddf --pos-range 0 1200 --stretch 1.4
 ```
 
 Tests (two recordings against `tests/reference/`; the U-Net files are compared only on a GPU):
@@ -49,7 +49,18 @@ python -m unittest discover tests -v
 python tests/test_outputs.py --update   # accept the current outputs as the new reference
 ```
 
-Code:
+Layout:
+
+```
+src/meridional/   the package (all Python code, below)
+config/           expected_peaks.csv, parameters.json (edited by the app)
+models/           U-Net weights
+tests/            test_outputs.py and its reference outputs
+scripts/          one-off helpers (move_data.sh)
+pyproject.toml    package metadata, dependencies, console commands
+```
+
+Code (in `src/meridional/`):
 
 | file | job |
 |---|---|

@@ -34,17 +34,17 @@ from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
-import maxflow
-import multiscale
-import unet
-from calibrate_m3 import load_or_calibrate
-from dialogs import BackgroundDialog, CalibrationDialog, ExpectedPeaksDialog, NormalizationDialog, ParametersDialog
-from frames import load_excluded
-from kymo_force import kymo_force
-from kymograph import find_frames, make_kymograph
-from params import PEAKS_CSV, load_params
-from recording import Job
-from viewer import Viewer
+from . import maxflow
+from . import multiscale
+from . import unet
+from .calibrate_m3 import load_or_calibrate
+from .dialogs import BackgroundDialog, CalibrationDialog, ExpectedPeaksDialog, NormalizationDialog, ParametersDialog
+from .frames import load_excluded
+from .kymo_force import kymo_force
+from .kymograph import find_frames, make_kymograph
+from .params import PEAKS_CSV, load_params
+from .recording import Job
+from .viewer import Viewer
 
 MAX_ROWS = 3
 
@@ -80,7 +80,7 @@ class Worker(QThread):
         if job.ddf:
             self.log.emit(kymo_force(npy, job.ddf, (p["pos_lo"], p["pos_hi"]), p["stretch"],
                                      dark_fraction=p["dark_fraction"]))
-        track_dir = os.path.join(job.out, f"{self.detector.__name__}_w{width}")
+        track_dir = os.path.join(job.out, f"{self.detector.__name__.rsplit('.', 1)[-1]}_w{width}")
         summary, cached = self.detector.process(npy, track_dir, p, PEAKS_CSV, load_excluded(job.out))
         self.log.emit(summary + (" (cached tracking)" if cached else ""))
         return npy, track_dir
@@ -281,8 +281,12 @@ class KymoWindow(QWidget):
             b.setEnabled(not running)
 
 
-if __name__ == "__main__":
+def main():
     app = QApplication(sys.argv)
     window = KymoWindow()
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

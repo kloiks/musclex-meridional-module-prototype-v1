@@ -2,13 +2,13 @@
 import json
 import os
 
-import cache
-import maxflow
-import multiscale
-import unet
-from calibrate_m3 import D_M3_NM
+from . import ROOT, cache
+from . import maxflow
+from . import multiscale
+from . import unet
+from .calibrate_m3 import D_M3_NM
 
-CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
+CONFIG = os.path.join(ROOT, "config")
 PARAMS_JSON = os.path.join(CONFIG, "parameters.json")
 PEAKS_CSV = os.path.join(CONFIG, "expected_peaks.csv")
 

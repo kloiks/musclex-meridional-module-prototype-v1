@@ -25,14 +25,14 @@ import numpy as np
 from scipy.ndimage import median_filter
 from scipy.optimize import linear_sum_assignment
 
-import cache
-import multiscale
-import tracking
-from background import column_backgrounds, shared_background, smoothed
-from frames import format_frames
-from labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
+from . import ROOT, cache
+from . import multiscale
+from . import tracking
+from .background import column_backgrounds, shared_background, smoothed
+from .frames import format_frames
+from .labels import label_tracks, read_expected_peaks, unmatched_names, write_labels
 
-MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "new_w61.pt")
+MODEL = os.path.join(ROOT, "models", "new_w61.pt")
 DEFAULTS = dict(unet_threshold=0.4, unet_gate=10, unet_memory=10, unet_min_length=20)
 # the keys that change tracks or heights; the blank-frame settings count through dropped_frames
 KEYS = list(DEFAULTS) + ["rmin", "rmax", "background", "bg_method", "bg_comp2", "bg_neg_weight", "smooth"]
@@ -239,5 +239,9 @@ def summarize(inp, p, n_tracks, labels):
     return text
 
 
-if __name__ == "__main__":
+def main():
     tracking.run_cli(process, "unet", __doc__)
+
+
+if __name__ == "__main__":
+    main()

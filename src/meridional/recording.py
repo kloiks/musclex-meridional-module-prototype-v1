@@ -6,12 +6,12 @@ from typing import NamedTuple
 
 import numpy as np
 
-import cache
-import multiscale
-from background import column_backgrounds, profile_noise, shared_background, smoothed
-from ddf import column_time, from_trigger, load_traces
-from kymograph import load_kymograph, recording_name
-from labels import unmatched_names
+from . import cache
+from . import multiscale
+from .background import column_backgrounds, profile_noise, shared_background, smoothed
+from .ddf import column_time, from_trigger, load_traces
+from .kymograph import load_kymograph, recording_name
+from .labels import unmatched_names
 
 GROUPS = (1, 2, 4, 8, 16)  # frame groupings always on offer, whatever the tracker and its scales
 

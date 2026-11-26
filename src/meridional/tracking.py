@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-import cache
-from frames import excluded_mask, parse_frames
-from kymograph import load_kymograph
+from . import cache
+from .frames import excluded_mask, parse_frames
+from .kymograph import load_kymograph
 
 VERSION = 2  # raise when the tracking changes, so saved runs are made again
 

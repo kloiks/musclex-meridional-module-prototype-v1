@@ -25,10 +25,10 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.ticker import MaxNLocator
 
-import cache
-from ddf import column_time, detector_frame_time, from_trigger, load_traces
-from frames import blank_frames
-from kymograph import load_kymograph, recording_name
+from . import cache
+from .ddf import column_time, detector_frame_time, from_trigger, load_traces
+from .frames import blank_frames
+from .kymograph import load_kymograph, recording_name
 
 CACHE_VERSION = 2           # raise when the figure or CSVs change, so saved ones are made again
 DARK_FRACTION = 0.05        # of the median column sum => beam off (default; the GUI's dark_fraction)
