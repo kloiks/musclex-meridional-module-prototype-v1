@@ -31,5 +31,21 @@
   "d_m3": 14.34,
   "pos_lo": 0,
   "pos_hi": 1200,
-  "stretch": 1.4
+  "stretch": 1.4,
+  "maxflow_min_snr": 1.5,
+  "maxflow_smooth": 5,
+  "maxflow_guide_max_res": 8,
+  "maxflow_guide_scale": 8,
+  "maxflow_corridor": 8.0,
+  "maxflow_det_half": 0.3,
+  "maxflow_max_shift": 25.0,
+  "maxflow_shift_scale": 1.48,
+  "maxflow_max_gap": 20,
+  "maxflow_c_miss": 2.0,
+  "maxflow_c_enter": 5.0,
+  "maxflow_c_exit": 5.0,
+  "maxflow_min_length": 10,
+  "norm_i0": false,
+  "norm_between": "none",
+  "norm_frames": ""
 }

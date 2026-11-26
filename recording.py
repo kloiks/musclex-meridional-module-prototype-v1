@@ -57,7 +57,7 @@ class Recording:
     traces: list          # force and length, time from the trigger; [] without a .ddf
     dt: float             # s per frame
     inv: float            # nm^-1 per px
-    detector: str         # "multiscale" or "unet"
+    detector: str         # "multiscale", "unet" or "maxflow"
     params: dict
     n_source: int         # frames, the excluded ones included
     frames: np.ndarray    # the frames kept
@@ -67,17 +67,34 @@ class Recording:
     r: np.ndarray         # scale x track x kept frame
     height: np.ndarray
     labels: dict          # track -> name
-    unmatched: dict       # track -> X1, X2, ... (U-Net)
+    unmatched: dict       # track -> X1, X2, ... (U-Net, max-flow)
+    npy: str = ""         # the kymograph file (its folder is the output folder)
+    qf: str = ""          # the quadrant-folded images
     s: int = 1            # frames grouped in the current view
     k: int = 0            # index of the tracker scale whose tracks it shows
     _groupings: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.q = self.pos * self.inv
+        self.raw_base, self.raw_height = self.base, self.height  # before normalisation
+        self.norm_note = ""                                       # for the kymograph title
+        self.beam = None                                          # BeamLog while normalised, else None
+        self.factors = np.ones(len(self.frames))                  # per kept frame, applied
         self.times = (self.frames + 0.5) * self.dt
         self.t_end = self.n_source * self.dt
         self.shared = shared_background(self.base, self.pos, self.params)  # None: one per column
         self._column = {int(f): i for i, f in enumerate(self.frames)}
+
+    # ---------------------------------------------------------------- normalisation
+
+    def normalize(self, factors):
+        """Multiply each kept frame of the kymograph (and the tracked heights) by its factor;
+        ones = as measured."""
+        self.factors = np.asarray(factors, dtype=float)
+        self.base = self.raw_base * self.factors
+        self.height = self.raw_height * self.factors
+        self.shared = shared_background(self.base, self.pos, self.params)
+        self._groupings = {}
 
     # ---------------------------------------------------------------- grouping
 
@@ -168,7 +185,15 @@ def load_recording(label, npy, ddf_path, track_dir, color):
     return Recording(label=label, color=color, traces=from_trigger(time.trigger, traces, [])[0], dt=time.dt,
                      inv=meta["inv_nm_per_pixel"], detector=detector, params=params, n_source=kymo.shape[1],
                      frames=frames, pos=pos[keep], base=kymo[keep][:, frames], scales=scales, r=r, height=height,
-                     labels=labels, unmatched=unmatched_names(r[0], labels) if detector == "unet" else {})
+                     labels=labels, unmatched=unmatched_names(r[0], labels) if detector != "multiscale" else {},
+                     npy=npy, qf=images_folder(npy, meta))
+
+
+def images_folder(npy, meta):
+    """The quadrant-folded images of a kymograph: as saved in its sidecar, or, if that folder is gone
+    (data moved), the folder holding the output folder (the default output is <qf folder>/kymo)."""
+    source = meta.get("source", "")
+    return source if os.path.isdir(source) else os.path.dirname(os.path.dirname(os.path.abspath(npy)))
 
 
 def group_options(recs):

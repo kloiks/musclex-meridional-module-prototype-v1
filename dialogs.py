@@ -1,4 +1,4 @@
-"""The dialogs: expected peaks, parameters, background and calibration."""
+"""The dialogs: expected peaks, parameters, background, calibration and normalization."""
 import csv
 import json
 import os
@@ -7,16 +7,17 @@ import numpy as np
 from PIL import Image
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QRadioButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                               QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
 import cache
 from calibrate_m3 import calibrate, from_m3
 from controls import canvas
 from frames import blank_frames, format_frames, load_excluded, parse_frames, save_excluded
 from kymograph import cached_kymograph, find_frames
+from normalization import BETWEEN, find_beamlog, plan
 from params import DEFAULTS, PEAKS_CSV, load_params, save_params
 
 # (group, [(key, label, choices or None)]); the widget type follows the default's type
@@ -33,6 +34,20 @@ PARAM_GROUPS = [
                          ("unet_gate", "Max step between linked peaks (px)", None),
                          ("unet_memory", "Missing frames a track may bridge", None),
                          ("unet_min_length", "Min detected frames of a track", None)]),
+    ("Max-flow detection (guided by multiscale anchors)", [
+        ("maxflow_min_snr", "Detection SNR in single frames", None),
+        ("maxflow_smooth", "Smoothing (px)", None),
+        ("maxflow_guide_max_res", "Guide anchors: max resolution scale", None),
+        ("maxflow_guide_scale", "Guide anchors: r(t) read at scale", None),
+        ("maxflow_corridor", "Corridor half-width around anchors (px)", None),
+        ("maxflow_det_half", "Detection reward: log SNR where it changes sign", None),
+        ("maxflow_max_shift", "Max step per frame (px)", None),
+        ("maxflow_shift_scale", "Step costing one unit (px)", None),
+        ("maxflow_max_gap", "Missing frames a link may bridge", None),
+        ("maxflow_c_miss", "Cost per missing frame", None),
+        ("maxflow_c_enter", "Cost of starting a track", None),
+        ("maxflow_c_exit", "Cost of ending a track", None),
+        ("maxflow_min_length", "Min detected frames of a track", None)]),
     ("Multiscale detection", [("rmin", "Radius from (px)", None),
                               ("rmax", "Radius to (px)", None),
                               ("smooth", "Smoothing (px)", None),
@@ -227,7 +242,7 @@ class ParametersDialog(QDialog):
 
     def exclude_box(self, jobs, width):
         """One "frames to exclude" field per recording."""
-        box = QGroupBox("Frames to exclude (multiscale and U-Net)")
+        box = QGroupBox("Frames to exclude (all detectors)")
         form = QFormLayout(box)
         QApplication.setOverrideCursor(Qt.WaitCursor)  # without a cached kymograph the images are read
         try:
@@ -480,4 +495,169 @@ class CalibrationDialog(QDialog):
                        image=os.path.abspath(r["frames"][0]), manual=r["manual"], set_on_frame=r["frame"])
             with open(r["path"], "w") as f:
                 json.dump(cal, f, indent=2)
+        self.accept()
+
+
+GOOD, BAD, OFF = "#2f9e44", "#d93025", "grey"
+
+
+def change_text(before, after, what):
+    """'<what> reduced by x %' (green) or 'increased' (red), as HTML; '' if either is missing."""
+    if not (np.isfinite(before) and np.isfinite(after) and before > 0):
+        return ""
+    change = 100.0 * (after - before) / before
+    color = GOOD if change <= 0 else BAD
+    word = "reduced" if change <= 0 else "increased"
+    return (f"<span style='color:{color}'>{what} {word} by {abs(change):.1f}%</span> "
+            f"<span style='color:grey'>({before:.2f}% → {after:.2f}%)</span>")
+
+
+class NormalizationDialog(QDialog):
+    """Normalisation of the loaded recordings (normalization.py): per frame by I0 from the beamline log,
+    and one scale factor per recording.  The information is recomputed on every change; Apply / OK
+    put it on the viewer, Cancel leaves the viewer as it was."""
+
+    def __init__(self, parent, viewer):
+        super().__init__(parent)
+        self.setWindowTitle("Normalization")
+        self.viewer, self.recs = viewer, viewer.recs
+        settings = viewer.norm
+        self.logs, self.status, self.flicker = [], [], []
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.within_box(settings))
+        layout.addWidget(self.between_box(settings))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Apply | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.Apply).clicked.connect(self.apply)
+        layout.addWidget(buttons)
+        self.resize(1100, 560)
+        self.update_info()
+
+    # ---------------------------------------------------------------- sections
+
+    def within_box(self, settings):
+        box = QGroupBox("Within sequence alignment")
+        grid = QGridLayout()
+        for j, title in enumerate(("Recording", "Beamline log (I0, I1 per frame)", "", "", "")):
+            grid.addWidget(QLabel(f"<b>{title}</b>"), 0, j)
+        for i, r in enumerate(self.recs, 1):
+            edit = QLineEdit(settings["logs"].get(r.npy) or find_beamlog(r.qf))
+            edit.setPlaceholderText("no log found next to the images")
+            edit.setMinimumWidth(380)
+            edit.editingFinished.connect(self.update_info)
+            browse = QPushButton("Browse…")
+            browse.clicked.connect(lambda _=False, r=r, e=edit: self.pick_log(r, e))
+            status, info = note(""), QLabel()
+            info.setMinimumWidth(330)
+            name = QLabel(r.label)
+            name.setStyleSheet(f"color: {r.color}")
+            for j, w in enumerate((name, edit, browse, status, info)):
+                grid.addWidget(w, i, j)
+            self.logs.append(edit)
+            self.status.append(status)
+            self.flicker.append(info)
+        self.i0_box = QCheckBox("Normalize by I0 incident intensity")
+        self.i0_box.setChecked(settings["use_i0"])
+        self.i0_box.setToolTip("Each frame (kymograph column, tracked heights) × mean(I0) / I0 of that frame, "
+                               "to reduce frame-to-frame flicker from the incident beam")
+        self.i0_box.toggled.connect(lambda _: self.update_info())
+        layout = QVBoxLayout(box)
+        layout.addLayout(grid)
+        layout.addWidget(self.i0_box)
+        layout.addWidget(note("The log is found in the recording folder (<run>/<run>.log) or the image folder. "
+                              "Flicker = frame-to-frame jitter of the kymograph column totals:\nRMS of the "
+                              "differences of log(total) between consecutive kept frames / √2. Slow changes "
+                              "(contraction, stretch) hardly count."))
+        return box
+
+    def between_box(self, settings):
+        box = QGroupBox("Between sequence alignment")
+        self.method = QComboBox()
+        for key, text in BETWEEN:
+            self.method.addItem(text, key)
+        self.method.setCurrentIndex(max(self.method.findData(settings["method"]), 0))
+        self.method.currentIndexChanged.connect(lambda _: self.update_info())
+        self.frames_edit = QLineEdit(settings["frames"])
+        self.frames_edit.setPlaceholderText("all kept frames")
+        self.frames_edit.setToolTip("Frames (from 0) whose mean profiles set the scale factors, e.g. 2-20 for "
+                                    "the frames before the stimulus; excluded frames are skipped")
+        self.frames_edit.editingFinished.connect(self.update_info)
+        self.between_info = QLabel()
+        self.between_info.setTextFormat(Qt.RichText)
+        self.between_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.between_info.setMinimumWidth(480)
+        form = QFormLayout()
+        form.addRow("Align by", self.method)
+        form.addRow("Frames used", self.frames_edit)
+        form.addRow(note("Least squares: log10 of the mean 20 px meridional (r 50–599 px) and equatorial\n"
+                         "(r 50–329 px) profiles, each projection weighs half, peak weights at M3, M6, I1,0,\n"
+                         "I1,1. Backgrounds: hull or fit as set in Background…, of the mean profile.\n"
+                         "Scale factors have geometric mean 1. The equatorial strip is read from the images\n"
+                         "once (equator_w<W>_g1.npy beside the kymograph)."))
+        row = QHBoxLayout(box)
+        row.addLayout(form, 1)
+        row.addWidget(self.between_info, 1)
+        return box
+
+    def pick_log(self, r, edit):
+        start = edit.text() or os.path.dirname(os.path.normpath(r.qf))
+        path, _ = QFileDialog.getOpenFileName(self, f"Beamline log of {r.label}", start,
+                                              "Log files (*.log);;All files (*)")
+        if path:
+            edit.setText(path)
+            self.update_info()
+
+    # ---------------------------------------------------------------- information
+
+    def settings(self):
+        return dict(logs={r.npy: e.text().strip() for r, e in zip(self.recs, self.logs)},
+                    use_i0=self.i0_box.isChecked(), method=self.method.currentData(),
+                    frames=self.frames_edit.text().strip())
+
+    def compute(self):
+        s = self.settings()
+        QApplication.setOverrideCursor(Qt.WaitCursor)  # the first between-sequence run reads the images
+        try:
+            return s, plan(self.recs, [s["logs"][r.npy] for r in self.recs], s["use_i0"], s["method"],
+                           s["frames"], load_params())
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def update_info(self):
+        s, self.plan = self.compute()
+        for w, status, info in zip(self.plan.within, self.status, self.flicker):
+            status.setText(w.status)
+            text = change_text(w.before, w.after, "Flicker")
+            if not text:
+                info.setText(f"<span style='color:grey'>flicker {w.before:.2f}%</span>")
+            elif s["use_i0"]:
+                info.setText(text)
+            else:
+                info.setText(f"<span style='color:{OFF}'>if on: </span>" + text)
+        self.between_info.setText(self.between_text(self.plan.between))
+
+    def between_text(self, b):
+        if b is None:
+            return "<span style='color:grey'>No between-sequence normalization.</span>"
+        if isinstance(b, str):
+            return f"<span style='color:{BAD}'>Cannot align: {b}</span>"
+        rows = "".join(
+            f"<tr><td style='color:{r.color}'>{r.label}</td><td align='right'>&nbsp;× {s:.3f}</td>"
+            + (f"<td align='right' style='color:grey'>&nbsp;bg {m:,.0f}</td>" if b.metric is not None else "")
+            + "</tr>" for r, s, m in zip(self.recs, b.scales, b.metric if b.metric is not None else b.scales))
+        spread = "".join(f"<br>{name}: " + change_text(b.before[key], b.after[key], "spread")
+                         for key, name in (("mer", "Meridian (r 50–599 px)"), ("eq", "Equator (r 50–329 px)")))
+        return (f"<b>Scale factors</b><table>{rows}</table>"
+                f"<br><b>Spread of the mean log level between sequences</b>{spread}")
+
+    # ---------------------------------------------------------------- apply
+
+    def apply(self):
+        s, self.plan = self.compute()
+        self.viewer.set_normalization(s, self.plan)
+        save_params({"norm_i0": s["use_i0"], "norm_between": s["method"], "norm_frames": s["frames"]})
+
+    def save(self):
+        self.apply()
         self.accept()

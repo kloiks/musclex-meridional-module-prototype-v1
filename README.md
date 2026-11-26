@@ -7,12 +7,14 @@ pip install -r requirements.txt
 python kymo_gui.py
 ```
 
-GUI: pick one to three `qf_results` folders, each with an optional `.ddf` and an output folder (default `<qf folder>/kymo`), then **Create kymographs and process multiscale**. **Clear second folder** empties the second row and removes its kymograph from the viewer without rerunning.
-**Run Unet Detection** runs the same steps but finds and links the peaks with a U-Net (`models/new_w61.pt`, needs PyTorch; GPU if available) in place of multiscale.
-**Grouping scale** in the viewer offers 1, 2, 4, 8 and 16 frames for both methods (plus multiscale's coarser scales): the kymographs, projections and background show the sliding mean of that many frames. U-Net tracks and heights stay per frame.
+GUI: pick one to three `qf_results` folders, each with an optional `.ddf` and an output folder (default `<qf folder>/kymo`), then, next to **Process patterns using**, **Multiscale peak detection**. **Clear second folder** empties the second row and removes its kymograph from the viewer without rerunning.
+**MaxFlow peak detection** runs multiscale, then detects peaks in single frames inside ±8 px corridors around the multiscale anchors and links them with one global min-cost flow (with split/merge arcs; the `guided_maxflow` tracker of meridional-simulation).
+**U-Net peak detection** runs the same steps but finds and links the peaks with a U-Net (`models/new_w61.pt`, needs PyTorch; GPU if available) in place of multiscale.
+**Grouping scale** in the viewer offers 1, 2, 4, 8 and 16 frames for every method (plus multiscale's coarser scales): the kymographs, projections and background show the sliding mean of that many frames. U-Net and max-flow tracks and heights stay per frame.
 Steps whose images, settings and inputs are unchanged are not repeated (hashes in the `.json` files, see `cache.py`).
-U-Net tracks that match no expected peak are named X1, X2, … from the centre out in each recording and drawn dashed; **Show unmatched tracks** hides them. **Smooth peak heights** and **Smooth background** (both methods, 10 frames by default, 1 = off) smooth the plotted lines only.
+U-Net and max-flow tracks that match no expected peak are named X1, X2, … from the centre out in each recording and drawn dashed; **Show unmatched tracks** hides them. **Smooth peak heights** and **Smooth background** (all methods, 10 frames by default, 1 = off) smooth the plotted lines only.
 The **Background intensity** section at the bottom has its own range (3–80 nm by default) and projection axis controls, not linked to the others; its range also sets where the area under the background is computed. It shares the time sliders and the grouping.
+**Normalization…** (needs the recordings in the viewer) scales the kymographs and tracked heights in the viewer only, nothing on disk: **Within sequence alignment** multiplies each frame by mean(I0) / I0 from the BioCAT log (`<run>/<run>.log`, found automatically or chosen), showing per recording how much the frame-to-frame flicker of the column totals drops (green) or rises (red); **Between sequence alignment** gives each recording one factor (geometric mean 1): least squares on the log mean meridional + equatorial profiles, or the equatorial or meridional background integrated over r 90–600 px (method of meridional-simulation `results/intensity_norm/passive_vs_active/scale_methods.md`), with the factors and the spread of the mean levels before and after. The settings are kept in `config/parameters.json` (`norm_*`) and reapplied on the next run.
 **Parameters…** also lists the **frames to exclude** per selected recording (both methods), numbered from 0 and filled in with the blank frames found; an edited list is kept in `<output>/excluded_frames.json` (**Auto** goes back).
 Beside the path fields: **Expected peaks…** edits `config/expected_peaks.csv` (names and d-spacings used to label tracks),
 **Parameters…** edits `config/parameters.json` (strip width, M3 search radius, force-figure range and the multiscale settings), and **Calibration…** sets the
@@ -25,8 +27,10 @@ Per folder it writes:
 | `calibration.json`, `calibration_projection.png` | M3 calibration on the first frame (strip width = kymograph width) |
 | `meridian_w<W>_g1.npy/.json`, `_log.png` | kymograph, positive half, one column per frame |
 | `meridian_w<W>_g1_force.png/.json`, `_events.csv`, `_traces.csv` | only with a `.ddf`; column 0 aligned to the first non-zero Trigger |
+| `equator_w<W>_g1.npy/.json` | equatorial strip per frame, made by **Normalization…** for the between-sequence alignment |
 | `multiscale_w<W>/` `tracks.csv`, `labels.csv`, `multiscale.npz`, `run.json` | multiscale tracking on the per-frame kymograph, beam-off frames dropped; anchors named after the expected peaks |
 | `unet_w<W>/` `tracks.csv`, `labels.csv`, `unet.npz`, `run.json` | U-Net detection (tracks of one reflection that share no frame may share a name) |
+| `maxflow_w<W>/` `tracks.csv`, `labels.csv`, `events.csv`, `maxflow.npz`, `run.json` | guided max-flow (needs `multiscale_w<W>/`, made first; naming as U-Net) |
 
 The scripts also run on their own:
 
@@ -54,5 +58,6 @@ Code:
 | `params.py` | parameters and config paths |
 | `calibrate_m3.py`, `kymograph.py` | M3 calibration; images to kymograph |
 | `ddf.py`, `kymo_force.py` | reading the `.ddf`; force figure and CSVs |
-| `multiscale.py`, `unet.py` | the two trackers; `tracking.py` is what they share |
+| `multiscale.py`, `unet.py`, `maxflow.py` | the three trackers; `tracking.py` is what they share |
+| `normalization.py` | beamline log (I0, I1), flicker, between-sequence scale factors |
 | `background.py`, `labels.py`, `frames.py`, `cache.py` | backgrounds and noise; naming tracks; excluded frames; data hashes |

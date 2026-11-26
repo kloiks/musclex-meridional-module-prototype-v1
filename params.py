@@ -3,6 +3,7 @@ import json
 import os
 
 import cache
+import maxflow
 import multiscale
 import unet
 from calibrate_m3 import D_M3_NM
@@ -11,8 +12,9 @@ CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
 PARAMS_JSON = os.path.join(CONFIG, "parameters.json")
 PEAKS_CSV = os.path.join(CONFIG, "expected_peaks.csv")
 
-DEFAULTS = dict(multiscale.DEFAULTS, **unet.DEFAULTS,
-                width=20, m3_rmin=250, d_m3=D_M3_NM, pos_lo=0, pos_hi=1200, stretch=1.4)
+DEFAULTS = dict(multiscale.DEFAULTS, **unet.DEFAULTS, **maxflow.DEFAULTS,
+                width=20, m3_rmin=250, d_m3=D_M3_NM, pos_lo=0, pos_hi=1200, stretch=1.4,
+                norm_i0=False, norm_between="none", norm_frames="")  # Normalization dialog
 
 
 def load_params():

@@ -4,17 +4,22 @@
 
 Each row: a quadrant-folded (qf_results) folder, an optional .ddf force file and
 an output folder (default <qf folder>/kymo); empty rows are skipped.  "Clear second
-folder" empties row 2 and drops its recording from the viewer.  "Create kymographs
-and process multiscale" runs, per row:
+folder" empties row 2 and drops its recording from the viewer.  "Process patterns using" one of three
+detectors runs, per row:
     1. M3 calibration on the first frame  -> calibration.json, calibration_projection.png
     2. kymograph.make_kymograph           -> meridian_w<W>_g1.npy/.json/_log.png (one column per frame)
     3. kymo_force.kymo_force (if a .ddf)  -> ..._force.png/.json, _events.csv, _traces.csv
-    4. multiscale.process on the per-frame kymograph -> multiscale_w<W>/
-       (tracks.csv, labels.csv named after config/expected_peaks.csv)
-"Run Unet Detection" runs the same steps with unet.process -> unet_w<W>/ instead of 4.
+    4. the peak detection on the per-frame kymograph (tracks.csv, labels.csv named after
+       config/expected_peaks.csv):
+       "Multiscale peak detection"  multiscale.process -> multiscale_w<W>/
+       "U-Net peak detection"       unet.process       -> unet_w<W>/
+       "MaxFlow peak detection"     maxflow.process    -> maxflow_w<W>/ (guided by the
+                                    multiscale anchors, so multiscale_w<W>/ is made too)
 A step whose data and settings have not changed (cache.py) is not repeated.
 
 "Expected peaks" edits config/expected_peaks.csv, "Parameters" config/parameters.json (dialogs.py).
+"Normalization" scales the kymographs in the viewer: each frame by I0 from the beamline log, and
+each recording by one factor (least squares or a background integral; normalization.py).
 
 Afterwards the viewer (viewer.py) shows the force/length traces overlaid with a time slider,
 the kymographs side by side and, below them, the tracked peaks of all recordings
@@ -29,10 +34,11 @@ from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import (QApplication, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
+import maxflow
 import multiscale
 import unet
 from calibrate_m3 import load_or_calibrate
-from dialogs import BackgroundDialog, CalibrationDialog, ExpectedPeaksDialog, ParametersDialog
+from dialogs import BackgroundDialog, CalibrationDialog, ExpectedPeaksDialog, NormalizationDialog, ParametersDialog
 from frames import load_excluded
 from kymo_force import kymo_force
 from kymograph import find_frames, make_kymograph
@@ -48,7 +54,7 @@ class Worker(QThread):
     result = Signal(int, str, str, str, str)  # job index, label, npy, ddf ("" if none), tracking dir
 
     def __init__(self, jobs, params, detector):
-        """detector: the module (multiscale or unet) that tracks the peaks."""
+        """detector: the module (multiscale, unet or maxflow) that tracks the peaks."""
         super().__init__()
         self.jobs, self.params, self.detector = jobs, params, detector
 
@@ -160,10 +166,16 @@ class KymoWindow(QWidget):
         self.add_button = button("+ Add third folder", self.toggle_third_row)
         self.clear_button = button("Clear second folder", self.clear_second_row,
                                    "Empty the second row and remove its kymograph from the viewer")
-        self.run_button = button("Create kymographs and process multiscale", lambda: self.run(multiscale))
-        self.unet_button = button("Run Unet Detection", lambda: self.run(unet),
-                                  "Create the kymographs and find the peaks with the new_w61 U-Net "
-                                  "instead of multiscale")
+        self.detector_buttons = [
+            button("Multiscale peak detection", lambda: self.run(multiscale),
+                   "Create the kymographs and track the peaks by averaging frames to find weak peaks, "
+                   "then following them down to single frames"),
+            button("U-Net peak detection", lambda: self.run(unet),
+                   "Create the kymographs and find the peaks in single frames with the new_w61 U-Net"),
+            button("MaxFlow peak detection", lambda: self.run(maxflow),
+                   "Create the kymographs, find the multiscale anchors, then detect peaks in single frames "
+                   "inside corridors around the anchors and link them by one global min-cost flow"),
+        ]
         self.log = QPlainTextEdit(readOnly=True)
         self.log.setMaximumHeight(120)
         self.viewer = Viewer()
@@ -175,7 +187,8 @@ class KymoWindow(QWidget):
         for text, slot in (("Expected peaks…", lambda: ExpectedPeaksDialog(self).exec()),
                            ("Parameters…", lambda: ParametersDialog(self, self.jobs()).exec()),
                            ("Calibration…", self.open_calibration),
-                           ("Background…", lambda: BackgroundDialog(self).exec())):
+                           ("Background…", lambda: BackgroundDialog(self).exec()),
+                           ("Normalization…", self.open_normalization)):
             side.addWidget(button(text, slot))
         paths = QHBoxLayout()  # no stretch inside: it would make the path rows spread out vertically
         paths.addLayout(self.grid, 1)
@@ -185,7 +198,7 @@ class KymoWindow(QWidget):
         layout = QVBoxLayout(content)
         layout.addLayout(paths)
         layout.addLayout(lay_out(QHBoxLayout(), self.add_button, self.clear_button))
-        layout.addLayout(lay_out(QHBoxLayout(), self.run_button, self.unet_button))
+        layout.addLayout(lay_out(QHBoxLayout(), QLabel("Process patterns using"), *self.detector_buttons))
         lay_out(layout, self.log, self.viewer)
         scroll = QScrollArea(widgetResizable=True)
         scroll.setWidget(content)
@@ -236,6 +249,15 @@ class KymoWindow(QWidget):
             self.attempt("Calibration", lambda: CalibrationDialog(self, jobs, p["width"], p["m3_rmin"],
                                                                   p["d_m3"]).exec())
 
+    def open_normalization(self):
+        """Needs the recordings in the viewer (it normalises their kymographs and heights)."""
+        if not self.viewer.recs:
+            self.log.appendPlainText("Normalization: run a peak detection first, so the recordings are in the viewer.")
+            return
+        self.attempt("Normalization", lambda: NormalizationDialog(self, self.viewer).exec())
+        if self.viewer.norm_error:
+            self.log.appendPlainText(f"Between-sequence normalization not applied: {self.viewer.norm_error}")
+
     def run(self, detector):
         jobs = self.selected_jobs()
         if not jobs:
@@ -255,7 +277,7 @@ class KymoWindow(QWidget):
         self.attempt("Viewer", lambda: self.viewer.load([result for _, result in self.results]))
 
     def set_running(self, running):
-        for b in (self.run_button, self.unet_button, self.clear_button):
+        for b in self.detector_buttons + [self.clear_button]:
             b.setEnabled(not running)
 
 

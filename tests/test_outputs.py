@@ -626,6 +626,70 @@ class TestCalibrationDialog(unittest.TestCase):
         self.assertEqual(self.saved(d), (60.0, True, 1))
 
 
+class TestNormalization(unittest.TestCase):
+    """normalization.py: I0 factors, flicker, the beamline log and the between-sequence scales."""
+
+    def test_i0_removes_beam_flicker(self):
+        import normalization as N
+        rng = np.random.default_rng(0)
+        frames = np.r_[0:40, 60:80]
+        i0 = 1e4 * (1 + 0.02 * rng.standard_normal(80))
+        trend = 5e5 * np.linspace(1, 1.3, len(frames))
+        totals = trend * i0[frames] / 1e4  # slow trend x beam
+        f = N.i0_factors(i0, frames)
+        self.assertAlmostEqual(np.mean(1 / f), 1.0, places=2)
+        self.assertGreater(N.flicker(totals, frames), 1.0)
+        self.assertAlmostEqual(N.flicker(totals * f, frames), N.flicker(trend, frames))  # only the trend is left
+        self.assertIsNone(N.i0_factors(i0[:50], frames))     # log shorter than the recording
+
+    def test_read_beamlog(self):
+        import normalization as N
+        run = os.path.join(tempfile.mkdtemp(), "Run_0001")
+        self.addCleanup(shutil.rmtree, os.path.dirname(run))
+        os.makedirs(os.path.join(run, "qf_results"))
+        with open(os.path.join(run, "Run_0001.log"), "w") as f:
+            f.write("#Instrument:\tBioCAT\n#I0 gain:\t1e+05\n#Filename\tstart_time\texposure_time\tI0\tI1\n"
+                    "Run_0001_000001\t0.0\t0.0049\t100.5\t2.0\nRun_0001_000002\t0.005\t0.0049\t99.5\t0.1\n")
+        path = N.find_beamlog(os.path.join(run, "qf_results"))
+        self.assertEqual(path, os.path.join(run, "Run_0001.log"))
+        log = N.read_beamlog(path)
+        np.testing.assert_allclose(log.i0, [100.5, 99.5])
+        np.testing.assert_allclose(log.i1, [2.0, 0.1])
+        self.assertEqual(log.header["I0 gain"], "1e+05")
+
+    def test_least_squares_matches_general_solution(self):
+        """The closed form equals the pairwise weighted least squares of scale_methods.md."""
+        import normalization as N
+        rng = np.random.default_rng(1)
+        regions = {}
+        for key, n_r in (("mer", 50), ("eq", 30)):
+            w = rng.uniform(1, 2, n_r)
+            regions[key] = (rng.normal(2, 0.3, (4, n_r)), w / w.sum())
+        a = N.ls_scales(regions, 4)
+        L, b = np.zeros((4, 4)), np.zeros(4)  # normal equations of sum_proj sum_pairs sum_r w (D + a_i - a_j)^2
+        for X, w in regions.values():
+            for i in range(4):
+                for j in range(i + 1, 4):
+                    c = (w * (X[i] - X[j])).sum()
+                    L[i, i] += 1; L[j, j] += 1; L[i, j] -= 1; L[j, i] -= 1
+                    b[i] -= c; b[j] += c
+        ref = np.linalg.lstsq(np.vstack([L, np.ones(4)]), np.r_[b, 0], rcond=None)[0]
+        np.testing.assert_allclose(a, ref, atol=1e-12)
+
+    def test_scaled_copies_are_aligned(self):
+        """Sequences that differ only by a factor come out with the inverse factors, by each method."""
+        import normalization as N
+        r = np.arange(700.0)
+        mer = 50 * np.exp(-r / 150) + 5 + 20 * np.exp(-(r - 270) ** 2 / 8)
+        eq = 80 * np.exp(-r / 100) + 3 + 40 * np.exp(-(r - 113) ** 2 / 18)
+        k = np.array([1.0, 2.0, 0.5])
+        seqs = [N.Sequence(str(i), mer * f, eq * f, 270.0) for i, f in enumerate(k)]
+        for method in ("ls", "eq_bg", "mer_bg"):
+            b = N.between_scales(seqs, method, dict(multiscale.DEFAULTS, bg_method="hull"))
+            np.testing.assert_allclose(b.scales * k, np.prod(k) ** (1 / 3), rtol=1e-6, err_msg=method)
+            self.assertLess(max(b.after.values()), 1e-6)
+
+
 def update():
     for rec in RECORDINGS:
         if not have_data(rec):

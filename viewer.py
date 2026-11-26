@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel,
 
 from controls import ContrastRow, RangeRows, SmoothingRow, TimeSliders, canvas
 from plots import Projection, broken, d_ticks, panel_row, smooth_series, style_time_axis, time_line
+from normalization import find_beamlog, plan
+from params import load_params
 from recording import group_options, load_recording
 
 COLORS = ("#2b7fff", "#e8590c", "#2f9e44")
@@ -30,6 +32,9 @@ class Viewer(QWidget):
         self.bg_projections = []  # per recording: its Projection of the background section
         self.force_lines, self.kymo_lines, self.track_lines, self.bg_lines = [], [], [], []  # at the slider time
         self.t_cur, self.t_max, self.dt = 0.0, 1.0, 1.0
+        p = load_params()  # the Normalization dialog's settings; logs: kymograph .npy -> log chosen
+        self.norm = dict(logs={}, use_i0=bool(p["norm_i0"]), method=p["norm_between"], frames=p["norm_frames"])
+        self.norm_error = ""  # why the between-sequence normalisation could not be applied
         self.make_controls()
         self.make_layout()
         self.track_canvas.mpl_connect("resize_event", self.respace_labels)
@@ -47,10 +52,10 @@ class Viewer(QWidget):
         self.peaks_edit.editingFinished.connect(self.redraw_tracks)
         self.scale_box = QComboBox()
         self.scale_box.setToolTip("Frames averaged (sliding mean) in the kymographs, projections and background. "
-                                  "U-Net tracks and heights stay per frame.")
+                                  "U-Net and max-flow tracks and heights stay per frame.")
         self.scale_box.currentTextChanged.connect(lambda _: self.redraw())
         self.unmatched_box = QCheckBox("Show unmatched tracks", checked=True)
-        self.unmatched_box.setToolTip("U-Net tracks that match no expected peak, named X1, X2, ... from the "
+        self.unmatched_box.setToolTip("U-Net and max-flow tracks that match no expected peak, named X1, X2, ... from the "
                                       "centre out in each recording (dashed)")
         self.unmatched_box.toggled.connect(lambda _: self.redraw_tracks())
 
@@ -113,12 +118,52 @@ class Viewer(QWidget):
         """``results``: (label, kymograph .npy, .ddf or "", tracking folder) of each recording."""
         self.recs = [load_recording(*result, color) for result, color in zip(results, COLORS)]
         self.t_cur = 0.0
+        self.renormalize()
         self.refresh(keep_grouping=False)
 
     def remove(self, i):
-        """Drop recording ``i``, keeping the time and grouping scale; the others are not reloaded."""
+        """Drop recording ``i``, keeping the time and grouping scale; the others are not reloaded
+        (but renormalised: the between-sequence scales depend on which recordings there are)."""
         del self.recs[i]
+        self.renormalize()
         self.refresh(keep_grouping=True)
+
+    # ---------------------------------------------------------------- normalisation
+
+    def renormalize(self):
+        """Apply the normalisation settings to the recordings (logs not chosen: found next to the images)."""
+        if not self.recs:
+            return
+        s = self.norm
+        if not s["use_i0"] and s["method"] == "none":
+            result = None
+        else:
+            logs = [s["logs"].get(r.npy) or find_beamlog(r.qf) for r in self.recs]
+            result = plan(self.recs, logs, s["use_i0"], s["method"], s["frames"], load_params())
+        self.apply_plan(result)
+
+    def set_normalization(self, settings, result):
+        """From the Normalization dialog: its settings and the plan it computed; redraws."""
+        self.norm = dict(settings, logs={**self.norm["logs"], **settings["logs"]})
+        self.apply_plan(result)
+        if self.recs:
+            self.refresh(keep_grouping=True)
+
+    def apply_plan(self, result):
+        self.norm_error = result.between if result is not None and isinstance(result.between, str) else ""
+        for i, r in enumerate(self.recs):
+            r.normalize(np.ones(len(r.frames)) if result is None else result.factors[i])
+            r.norm_note = "" if result is None else self.norm_note(result, i)
+            r.beam = None if result is None else result.within[i].beam
+
+    def norm_note(self, result, i):
+        """Short description of what was applied to recording i, for the kymograph title."""
+        parts = []
+        if self.norm["use_i0"] and result.within[i].i0 is not None:
+            parts.append("÷ I0")
+        if not isinstance(result.between, (str, type(None))):
+            parts.append(f"× {result.between.scales[i]:.3f}")
+        return f", {' '.join(parts)}" if parts else ""
 
     def refresh(self, keep_grouping):
         """Fit the sliders and grouping scales to the recordings and redraw.  No recordings: hide."""
@@ -126,7 +171,7 @@ class Viewer(QWidget):
             self.hide()
             return
         self.projections, self.bg_projections = [], []  # the old ones, until the redraw
-        self.unmatched_box.setEnabled(self.any_unet())
+        self.unmatched_box.setEnabled(self.any_per_frame())
         self.t_max = max(r.t_end for r in self.recs)
         self.dt = min(r.dt for r in self.recs)
         last = max(0, round(self.t_max / self.dt) - 1)
@@ -144,8 +189,13 @@ class Viewer(QWidget):
         self.show()
         self.redraw()
 
-    def any_unet(self):
-        return any(r.detector == "unet" for r in self.recs)
+    def any_per_frame(self):
+        """Whether a recording was tracked per frame (U-Net or max-flow) rather than by multiscale."""
+        return any(r.detector != "multiscale" for r in self.recs)
+
+    def per_frame_name(self):
+        names = {"unet": "U-Net", "maxflow": "max-flow"}
+        return " / ".join(sorted({names[r.detector] for r in self.recs if r.detector in names}))
 
     def grouping(self):
         return int(self.scale_box.currentText() or 1)
@@ -210,16 +260,26 @@ class Viewer(QWidget):
             self.set_time(self.t_cur)
 
     def draw_force(self):
+        """Force and length from the .ddf and, while a normalisation is applied, I0 and I1 from the
+        beamline log (frame k at the middle of its exposure, from the trigger)."""
         fig = self.force_canvas.figure
         fig.clear()
         traces = [(r, tr) for r in self.recs for tr in r.traces]
         keys = [k for k in ("force", "length") if any(tr["key"] == k for _, tr in traces)]
+        beams = [r for r in self.recs if r.beam is not None]
+        keys += ["I0", "I1"] if beams else []
+        self.force_canvas.setMinimumHeight(320 if len(keys) <= 2 else 150 * len(keys))
         self.force_lines = []
         if not keys:
             fig.text(0.5, 0.5, "no .ddf loaded", ha="center", va="center", color="grey")
             return
         axes = fig.subplots(len(keys), 1, sharex=True, squeeze=False)[:, 0]
         for ax, key in zip(axes, keys):
+            if key in ("I0", "I1"):
+                for r in beams:
+                    y = (r.beam.i0 if key == "I0" else r.beam.i1)[:r.n_source]
+                    ax.plot((np.arange(len(y)) + 0.5) * r.dt, y, lw=1.2, color=r.color, label=r.label)
+                ax.set_ylabel(f"{key} ({'incident' if key == 'I0' else 'transmitted'}, counts)", fontsize=8)
             for r, tr in traces:
                 if tr["key"] == key:
                     ax.plot(tr["t"], tr["y"], lw=1.2, color=r.color, label=r.label)
@@ -256,7 +316,7 @@ class Viewer(QWidget):
         bar = fig.colorbar(im, ax=ax, pad=0.13, fraction=0.05)  # own scale, clear of the px axis
         bar.set_label("I (counts)" if counts else "log(1+I)", fontsize=8)
         bar.ax.tick_params(labelsize=7)
-        ax.set_title(f"{r.label}  (s = {r.s})", color=r.color, fontsize=9)
+        ax.set_title(f"{r.label}  (s = {r.s}{r.norm_note})", color=r.color, fontsize=9)
         ax.set_xlabel("time (s)")
         ax.set_xlim(0.0, self.t_max)
         ax.set_ylim(*self.q_shown)
@@ -278,7 +338,7 @@ class Viewer(QWidget):
         """Tracks (q, labelled in d) and, equally sized below, their heights; each beside one grouped
         projection per recording (background removed as the tracker did, q up), the detected peaks
         marked with their d above and their height below; dotted: the acceptance threshold."""
-        n, unet = len(self.recs), self.any_unet()
+        n, per_frame = len(self.recs), self.any_per_frame()
         ax_t, right_t = panel_row(self.track_canvas.figure, n, self.q_shown, share_q=True)
         ax_h, right_h = panel_row(self.height_canvas.figure, n, self.q_shown, share_q=False)
         heights = np.concatenate([np.empty(0)] + [self.draw_track(ax_t, ax_h, r, a, name)
@@ -286,7 +346,7 @@ class Viewer(QWidget):
         self.projections = list(zip(*(
             self.make_projections(axes, what, self.range, self.q_shown, lambda r: r.view.flats)
             for axes, what in ((right_t, "d"), (right_h, "height")))))
-        for pr in [] if unet else self.projections[0]:
+        for pr in [] if per_frame else self.projections[0]:
             pr.ax.legend([pr.extra], ["noise × SNR threshold"], fontsize=6, loc="lower right", frameon=False)
 
         ax_t.set_ylim(*self.q_shown)
@@ -297,8 +357,8 @@ class Viewer(QWidget):
             ax_h.set_ylim(heights.min() / 2.0, heights.max() * 2.0)
         ax_h.set_ylabel("peak height above baseline", fontsize=9)
         at = f"at grouping scale {self.grouping()}"
-        ax_t.set_title("U-Net tracks (per frame)" if unet else f"tracked peaks {at}", fontsize=9)
-        ax_h.set_title(("U-Net peak heights (per frame)" if unet else f"peak heights {at}") + self.height_smooth.note,
+        ax_t.set_title(f"{self.per_frame_name()} tracks (per frame)" if per_frame else f"tracked peaks {at}", fontsize=9)
+        ax_h.set_title((f"{self.per_frame_name()} peak heights (per frame)" if per_frame else f"peak heights {at}") + self.height_smooth.note,
                        fontsize=9)
         for ax in (ax_t, ax_h):
             style_time_axis(ax, self.t_max, left_labels=True)
@@ -373,7 +433,7 @@ class Viewer(QWidget):
             return
         c = r.column(col)
         peaks = r.peaks_at(col, c.flat, shown, self.q_shown)
-        threshold = None if r.detector == "unet" else r.threshold * c.sigma  # the U-Net has no SNR threshold
+        threshold = r.threshold * c.sigma if r.detector == "multiscale" else None  # the multiscale acceptance SNR
         for pr in projections:
             pr.show(r.q, c.flat, threshold, peaks)
 
