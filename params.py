@@ -14,7 +14,7 @@ PEAKS_CSV = os.path.join(CONFIG, "expected_peaks.csv")
 
 DEFAULTS = dict(multiscale.DEFAULTS, **unet.DEFAULTS, **maxflow.DEFAULTS,
                 width=20, m3_rmin=250, d_m3=D_M3_NM, pos_lo=0, pos_hi=1200, stretch=1.4,
-                norm_i0=False, norm_between="none", norm_frames="")  # Normalization dialog
+                norm_i0=False, norm_between="none", norm_frames="2-20")  # Normalization dialog
 
 
 def load_params():

@@ -407,7 +407,7 @@ class TestBackgroundSection(unittest.TestCase):
 
         def check_area(q_lo, q_hi):
             band = (rec.q >= q_lo) & (rec.q <= q_hi)
-            expected = np.trapezoid(rec.view.backgrounds[band], rec.q[band], axis=0)
+            expected = (getattr(np, "trapezoid", None) or np.trapz)(rec.view.backgrounds[band], rec.q[band], axis=0)
             line = view.background_canvas.figure.axes[0].lines[0]
             np.testing.assert_allclose(line.get_ydata(), expected)
 

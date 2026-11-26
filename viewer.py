@@ -16,6 +16,7 @@ UNMATCHED_COLOR = "#7a3fb5"
 NO_FRAME = "frame dropped\nor outside"  # shown on the projections
 SMOOTH_FRAMES = 10  # default window of the plotted peak heights and background
 BG_D_NM = ("3", "80")  # default d range (nm) of the background section
+trapezoid = getattr(np, "trapezoid", None) or np.trapz  # np.trapezoid is NumPy >= 2.0
 
 
 class Viewer(QWidget):
@@ -386,11 +387,11 @@ class Viewer(QWidget):
         ax_b, right = panel_row(self.background_canvas.figure, len(self.recs), q_range, share_q=False)
         for r in self.recs:
             band = (r.q >= q_lo) & (r.q <= q_hi)  # area under the background
-            area = np.trapezoid(r.view.backgrounds[band], r.q[band], axis=0)
+            area = trapezoid(r.view.backgrounds[band], r.q[band], axis=0)
             area = smooth_series(area, r.frames, self.background_smooth.window)
             ax_b.plot(*broken(r.frames, r.times, area), lw=1.3, color=r.color, label=r.label)
             if r.shared is not None:
-                ax_b.axhline(np.trapezoid(r.shared[band], r.q[band]), color=r.color, ls="--", lw=1,
+                ax_b.axhline(trapezoid(r.shared[band], r.q[band]), color=r.color, ls="--", lw=1,
                              label=f"{r.label}: averaged profile's (subtracted)")
         self.bg_projections = self.make_projections(right, "bg", self.bg_range, q_range, lambda r: r.view.profiles)
         pr = self.bg_projections[0]

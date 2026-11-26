@@ -18,7 +18,8 @@ scale_methods.md; the scale factors have geometric mean 1)
     "eq_bg"   background (hull or fit, as in Parameters/Background) of the mean equatorial profile,
               summed over r 90-600 px; s_i = geometric mean(N) / N_i.
     "mer_bg"  the same on the meridional profile.
-The mean profiles are over the frames used (kept frames; optionally a typed list such as 2-20), after
+The mean profiles are over the frames used (default 2-20, the frames before the stimulus; empty = all
+kept frames; dropped frames are always left out), after
 the I0 normalisation if it is on.  The equatorial strip is read from the quadrant-folded images once
 and saved next to the kymograph (equator_w<W>_g1.npy).
 """
@@ -244,7 +245,7 @@ def between_scales(seqs, method, p):
 
 
 def parse_used(text, frames):
-    """The kept frames (source numbers) in the typed list ``text`` (empty: all kept frames)."""
+    """The kept frames (source numbers) in the typed list ``text`` (empty: all kept frames); dropped frames are skipped."""
     frames = np.asarray(frames)
     if not text.strip():
         return frames

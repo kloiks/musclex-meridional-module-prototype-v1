@@ -579,9 +579,10 @@ class NormalizationDialog(QDialog):
         self.method.setCurrentIndex(max(self.method.findData(settings["method"]), 0))
         self.method.currentIndexChanged.connect(lambda _: self.update_info())
         self.frames_edit = QLineEdit(settings["frames"])
-        self.frames_edit.setPlaceholderText("all kept frames")
-        self.frames_edit.setToolTip("Frames (from 0) whose mean profiles set the scale factors, e.g. 2-20 for "
-                                    "the frames before the stimulus; excluded frames are skipped")
+        self.frames_edit.setPlaceholderText("empty = all frames except the dropped ones")
+        self.frames_edit.setToolTip("Frames (from 0) whose mean profiles set the scale factors; 2-20 (default) = "
+                                    "the frames before the stimulus; empty = all frames except the dropped ones "
+                                    "(dropped frames are always skipped)")
         self.frames_edit.editingFinished.connect(self.update_info)
         self.between_info = QLabel()
         self.between_info.setTextFormat(Qt.RichText)

@@ -81,7 +81,7 @@ Needs a finished run (the recordings in the viewer). It changes what the viewer 
 | Equatorial background, r 90–600 px | the background (hull or fit, as in **Background…**) under the mean equatorial profile, summed |
 | Meridional background, r 90–600 px | the same on the meridian |
 
-**Frames used** limits the mean profiles to some frames, e.g. `2-20` for the frames before the stimulus (blank = all kept frames). The panel lists the factors and the spread of the mean levels between recordings before and after. The first time, the equatorial strip is read from the images (`equator_w<W>_g1.npy` in the output folder).
+**Frames used** sets the frames the mean profiles average: `2-20` by default (the frames before the stimulus); empty = all frames except the dropped ones. Dropped frames are always left out. The panel lists the factors and the spread of the mean levels between recordings before and after. The first time, the equatorial strip is read from the images (`equator_w<W>_g1.npy` in the output folder).
 
 ### Parameters…
 
